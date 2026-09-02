@@ -416,6 +416,21 @@ Item {
   // pointer landing back on its parent row does not hover-reopen it: the
   // child pane had the hover until it died, and the parent row regaining it
   // restarts the dwell. Click, Enter, and Right still reopen immediately.
+  // True while a freshly opened pane is still sliding in from the ghost
+  // slot; the next ghost preview waits so the slot holds one thing at a
+  // time.
+  property bool paneEntering: false
+  Timer {
+    id: enterClear
+    interval: 380
+    repeat: false
+    onTriggered: root.paneEntering = false
+  }
+  function noteEntering() {
+    root.paneEntering = true
+    enterClear.restart()
+  }
+
   // Snapshot of the pane a walk-back just closed, so it can slide right and
   // fade instead of vanishing: the Repeater destroys the real delegate the
   // moment the model shrinks.
@@ -505,6 +520,7 @@ Item {
     })
     root.paneGeometry = root.paneGeometry.slice(0, depth + 1)
     root.panes = next
+    root.noteEntering()
     root.loadProvider(target)
     return true
   }
@@ -1184,7 +1200,7 @@ Item {
       // through — two copies of the same menu at once.
       Loader {
         active: root.centeredLayout && root.animations && root.ghostMenuId !== ""
-          && root.exitSnapshot === null
+          && root.exitSnapshot === null && !root.paneEntering
         sourceComponent: GhostPane { panelItem: panel }
       }
 
@@ -1328,10 +1344,14 @@ Item {
             ? (flippedXEffective ? Item.BottomRight : Item.BottomLeft)
             : (flippedXEffective ? Item.TopRight : Item.TopLeft)
           scale: !root.animations || entered || root.centeredLayout ? 1 : 0.85
-          opacity: !root.animations || entered ? 1 : 0
+          // Centered layout: no entrance fade — the pane slides in opaque
+          // from the ghost preview's slot, so the preview reads as becoming
+          // the pane while the chain shifts left in the same motion.
+          opacity: !root.animations || entered || root.centeredLayout ? 1 : 0
 
           transform: Translate {
-            x: root.animations && root.centeredLayout && !pane.entered ? Style.space(28) : 0
+            x: root.animations && root.centeredLayout && !pane.entered
+              ? root.paneWidth + Style.space(12) : 0
             Behavior on x {
               enabled: root.animations
               NumberAnimation { duration: 340; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.38, 1.21, 0.22, 1.0, 1, 1] }
