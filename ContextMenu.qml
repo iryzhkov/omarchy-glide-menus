@@ -1568,9 +1568,10 @@ Item {
     color: root.background
     borderSpec: root.borderSpec
     clip: true
-    // Near-opaque surface so the preview stays legible over busy windows;
-    // the "not yet real" feel comes from muted text, not transparency.
-    opacity: 0.8
+    // Fully opaque surface — transparency over busy windows kills
+    // legibility. The "not yet real" feel comes entirely from the muted
+    // text color.
+    opacity: 1
 
     Column {
       anchors.fill: parent
