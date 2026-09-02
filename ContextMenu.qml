@@ -146,10 +146,12 @@ Item {
   readonly property int cornerRadius: Style.cornerRadius
   readonly property string fontFamily: Style.font.menuFamily
 
-  readonly property int paneWidth: Style.space(Math.max(120, Number(root.setting("paneWidth", 268)) || 268))
-  readonly property int rowHeight: Math.max(Style.space(28), Style.font.body + Style.spacing.controlPaddingY * 2)
+  readonly property int paneWidth: Style.space(Math.max(120, Number(root.setting("paneWidth", 300)) || 300))
+  // Same row metric as the built-in menu card, so the two feel like one
+  // family rather than a dense context menu next to an airy launcher.
+  readonly property int rowHeight: Math.max(Style.space(50), Style.font.body + Style.spacing.rowPaddingX * 2)
   readonly property int panePadding: Style.spacing.xs
-  readonly property int iconColumn: Style.space(26)
+  readonly property int iconColumn: Style.space(30)
 
   // ---------------------------------------------------------------- data
 
@@ -317,8 +319,24 @@ Item {
 
   // Truncate the cascade to `depth` panes. Used when the pointer moves to a
   // different row, so stale submenus close instead of piling up.
+  // The submenu that was just closed by walking back, kept briefly so the
+  // pointer landing back on its parent row does not hover-reopen it: the
+  // child pane had the hover until it died, and the parent row regaining it
+  // restarts the dwell. Click, Enter, and Right still reopen immediately.
+  property string recentlyClosedMenu: ""
+  Timer {
+    id: reopenGuard
+    interval: 600
+    repeat: false
+    onTriggered: root.recentlyClosedMenu = ""
+  }
+
   function truncate(depth) {
     if (root.panes.length <= depth) return
+    if (root.panes[depth] && root.panes[depth].menuId) {
+      root.recentlyClosedMenu = String(root.panes[depth].menuId)
+      reopenGuard.restart()
+    }
     var next = root.panes.slice(0, depth)
     // The pane that becomes deepest takes its parked filter back as the live
     // type-ahead, so walking back up the cascade restores the same filtered
@@ -1248,6 +1266,7 @@ Item {
                 onTriggered: {
                   if (!hover.hovered) return
                   if (row.entry && root.isSubmenu(row.entry)) {
+                    if (root.targetOf(row.entry) === root.recentlyClosedMenu) return
                     root.openChild(pane.index, row.entry, pane.x, pane.y,
                                    row.y - list.contentY + root.panePadding + pane.headerHeight)
                   } else {

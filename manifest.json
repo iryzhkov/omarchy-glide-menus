@@ -29,7 +29,7 @@
       "wallpaperDoubleClick": true,
       "inlineApps": true,
       "submenuDelay": 140,
-      "paneWidth": 268,
+      "paneWidth": 300,
       "rightClickCommand": "xdg-terminal-exec",
       "animations": true,
       "summonPlacement": "center",
@@ -107,7 +107,7 @@
         "min": 160,
         "max": 520,
         "step": 4,
-        "defaultValue": 268,
+        "defaultValue": 300,
         "description": "In the shell's spacing units, so it tracks the rest of your scaling. Wider suits long application names; narrower keeps a deep cascade on one screen."
       },
       {
