@@ -1229,7 +1229,19 @@ Item {
       }
 
       Repeater {
-        model: root.panes.length
+        // A plain integer model resets every delegate on each change, which
+        // replayed the surviving panes' entrance animations on every
+        // back/forward step (the "parent teleports" glitch). ScriptModel
+        // diffs the index list, so only the pane actually added or removed
+        // is created or destroyed; the rest keep their state and just
+        // animate to their new slots.
+        model: ScriptModel {
+          values: {
+            var indices = []
+            for (var i = 0; i < root.panes.length; i++) indices.push(i)
+            return indices
+          }
+        }
 
         delegate: BorderSurface {
           id: pane
