@@ -1178,8 +1178,13 @@ Item {
       // Ghost preview of the submenu the selection points at, to the right
       // of the active pane — the direction the Right key travels. Centered
       // layout only; it fades and never takes input.
+      // Held back while an exit stand-in is in flight: walking back restores
+      // the selection onto the closed submenu's row, and its preview would
+      // otherwise spawn in the same slot the departing pane is sliding
+      // through — two copies of the same menu at once.
       Loader {
         active: root.centeredLayout && root.animations && root.ghostMenuId !== ""
+          && root.exitSnapshot === null
         sourceComponent: GhostPane { panelItem: panel }
       }
 
