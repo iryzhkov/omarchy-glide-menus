@@ -1072,9 +1072,9 @@ Item {
       // it back before there is anything to give it to.
       onVisibleChanged: if (visible) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
 
-      // Ghost preview of the submenu the selection points at, on the side
-      // the real pane will slide in from. Centered layout only; it fades
-      // and never takes input.
+      // Ghost preview of the submenu the selection points at, to the right
+      // of the active pane — the direction the Right key travels. Centered
+      // layout only; it fades and never takes input.
       Loader {
         active: root.centeredLayout && root.animations && root.ghostMenuId !== ""
         sourceComponent: GhostPane { panelItem: panel }
@@ -1110,11 +1110,12 @@ Item {
             : anchorX - width - root.paneWidth + Style.space(4)
 
           // Centered layout: the pane being used stays mid-screen so the
-          // eyes never travel; each ancestor slides one slot to the right,
-          // the oldest walking off the edge. Depth changes animate as one
-          // sliding chain.
+          // eyes never travel; each ancestor slides one slot to the LEFT
+          // (back the way you came), the oldest walking off the edge, and
+          // forward — the Right key — is rightward. Depth changes animate
+          // as one sliding chain.
           readonly property real centeredX: (panel.width - width) / 2
-            + (root.panes.length - 1 - index) * (root.paneWidth + Style.space(12))
+            - (root.panes.length - 1 - index) * (root.paneWidth + Style.space(12))
 
           x: root.centeredLayout
             ? centeredX
@@ -1151,12 +1152,10 @@ Item {
             ? (flippedXEffective ? Item.BottomRight : Item.BottomLeft)
             : (flippedXEffective ? Item.TopRight : Item.TopLeft)
           scale: !root.animations || entered || root.centeredLayout ? 1 : 0.85
-          opacity: !root.animations || entered
-            ? (root.centeredLayout && !deepest && root.panes.length > 1 ? 0.55 : 1)
-            : 0
+          opacity: !root.animations || entered ? 1 : 0
 
           transform: Translate {
-            x: root.animations && root.centeredLayout && !pane.entered ? -Style.space(28) : 0
+            x: root.animations && root.centeredLayout && !pane.entered ? Style.space(28) : 0
             Behavior on x {
               enabled: root.animations
               NumberAnimation { duration: 340; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.38, 1.21, 0.22, 1.0, 1, 1] }
@@ -1435,7 +1434,7 @@ Item {
     height: Math.min(
       Math.max(ghostRows.length, 1) * root.rowHeight + root.panePadding * 2,
       panelItem.height - Style.gapsOut * 2)
-    x: (panelItem.width - width) / 2 - (root.paneWidth + Style.space(12))
+    x: (panelItem.width - width) / 2 + (root.paneWidth + Style.space(12))
     y: Math.max(Style.gapsOut, (panelItem.height - height) / 2)
 
     radius: root.cornerRadius
