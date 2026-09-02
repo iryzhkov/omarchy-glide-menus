@@ -136,7 +136,23 @@ Item {
   property string filterText: ""
   property int selectedIndex: -1
 
-  onFilterTextChanged: root.selectedIndex = root.filterText.length > 0 ? 0 : -1
+  property bool searchProvidersLoaded: false
+
+  onFilterTextChanged: {
+    root.selectedIndex = root.filterText.length > 0 ? 0 : -1
+    // First keystroke of a search: pull in every provider-backed submenu this
+    // plugin can fill (Apps above all), so their rows are searchable too.
+    if (root.filterText.length > 0 && !root.searchProvidersLoaded) {
+      root.searchProvidersLoaded = true
+      Qt.callLater(function() {
+        for (var i = 0; i < root.itemOrder.length; i++) {
+          var entry = root.item(root.itemOrder[i])
+          if (entry && entry.provider && root.providerSupported(entry.provider))
+            root.loadProvider(entry.kind === "link" ? entry.target : entry.id)
+        }
+      })
+    }
+  }
 
   // ------------------------------------------------------------- surfaces
   //
@@ -198,17 +214,54 @@ Item {
     var filter = depth === root.panes.length - 1 ? root.filterText : String(spec.filter || "")
     if (!filter) return rows
 
+    // Typing searches the whole subtree under this pane, not just its own
+    // rows: "emby" at the root finds the app inside Apps, "theme" finds the
+    // Style > Theme submenu. Matches keep definition order.
     var terms = filter.toLowerCase().trim().split(/\s+/)
     var out = []
-    for (var i = 0; i < rows.length; i++) {
-      var haystack = MenuModel.nameSearchText(rows[i])
+    for (var i = 0; i < root.itemOrder.length; i++) {
+      var entry = root.item(root.itemOrder[i])
+      if (!entry) continue
+      if (!root.inSubtree(entry, spec.menuId)) continue
+      if (!MenuModel.isVisible(root.items, root.itemOrder, root.whenResults, entry, 0)) continue
+      var haystack = MenuModel.nameSearchText(entry)
       var matched = true
       for (var t = 0; t < terms.length; t++) {
         if (terms[t] && haystack.indexOf(terms[t]) < 0) { matched = false; break }
       }
-      if (matched) out.push(rows[i])
+      if (matched) out.push(entry)
     }
     return out
+  }
+
+  // Whether `entry` sits anywhere under `menuId` (its parent chain reaches
+  // it). Direct children count; the subtree root itself does not.
+  function inSubtree(entry, menuId) {
+    var id = entry.parent
+    var guard = 0
+    while (id && guard < 32) {
+      if (id === menuId) return true
+      var parent = root.item(id)
+      id = parent ? parent.parent : ""
+      guard += 1
+    }
+    return false
+  }
+
+  // "Style › Theme" breadcrumb for a search result that lives below the
+  // pane being searched, so equal labels from different branches read apart.
+  function entryPathLabel(entry, stopAt) {
+    var parts = []
+    var id = entry.parent
+    var guard = 0
+    while (id && id !== stopAt && id !== "root" && guard < 8) {
+      var parent = root.item(id)
+      if (!parent) break
+      parts.unshift(parent.label || parent.title || id)
+      id = parent.parent
+      guard += 1
+    }
+    return parts.join(" \u203a ")
   }
 
   // A row that opens another pane. Provider-backed rows count before their
@@ -251,6 +304,7 @@ Item {
     root.selectedIndex = -1
     root.paneGeometry = []
     root.panes = [spec]
+    root.searchProvidersLoaded = false
     root.opened = true
     // Guards are cheap and their answers go stale (is a recording running? is
     // night light on?), so re-run them each time the menu is summoned rather
@@ -1404,9 +1458,23 @@ Item {
               }
 
               Text {
+                id: pathHint
+                anchors.right: chevron.left
+                anchors.rightMargin: Style.spacing.xs
+                anchors.verticalCenter: parent.verticalCenter
+                width: Math.min(implicitWidth, row.width * 0.4)
+                visible: pane.filtering && text !== ""
+                text: pane.filtering && row.entry ? root.entryPathLabel(row.entry, pane.spec.menuId) : ""
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                color: Qt.darker(root.foreground, 1.5)
+                elide: Text.ElideLeft
+              }
+
+              Text {
                 anchors.left: parent.left
                 anchors.leftMargin: Style.spacing.sm + root.iconColumn + Style.spacing.xs
-                anchors.right: chevron.left
+                anchors.right: pathHint.visible ? pathHint.left : chevron.left
                 anchors.rightMargin: Style.spacing.xs
                 anchors.verticalCenter: parent.verticalCenter
                 text: row.entry ? MenuModel.labelFor(row.entry, root.checkedResults) : ""
