@@ -175,6 +175,34 @@ Item {
       "/bin/bash", "-c", String(script)]
   }
 
+  // Same contract, with the byte ceiling enforced inside the pipeline: the
+  // producer's stdout runs through head, so no more than capBytes + 1 bytes
+  // can ever reach this process, before any QML framing or collection. The
+  // extra byte is deliberate — output longer than capBytes arrives truncated
+  // to capBytes + 1, the QML side sees length > capBytes, and the run is
+  // discarded rather than parsed (fail closed). When head stops reading, the
+  // producer dies on SIGPIPE, so an unbounded writer is also stopped at the
+  // source.
+  function helperPipeline(seconds, script, capBytes) {
+    return root.helperCommand(seconds,
+      "{\n" + String(script) + "\n} | /usr/bin/head -c " + (capBytes + 1))
+  }
+
+  // Cancel a running helper and let its wrapper acknowledge the teardown.
+  // signal(15) delivers TERM to the timeout wrapper, which forwards it to
+  // the child's own process group and, per --kill-after, KILLs that group
+  // two seconds later if it survives. The Process's exited signal is the
+  // acknowledgement that the wrapper (and therefore the reaped tree) is
+  // gone; every start site already refuses to start while running is true,
+  // so a helper is never replaced before that acknowledgement.
+  function cancelHelper(proc) {
+    if (proc.running) proc.signal(15)
+  }
+
+  function shellQuoted(s) {
+    return "'" + String(s).replace(/'/g, "'\\''") + "'"
+  }
+
   // ---------------------------------------------------------------- state
 
   property bool opened: false
@@ -476,10 +504,24 @@ Item {
     root.loadProvidersForOpenPanes()
   }
 
-  function close() {
-    pointerProc.running = false
-    providerProc.running = false
+  // Cancel every non-interactive helper with an acknowledged teardown: TERM
+  // to the wrapper, which timeout forwards to the child's process group and
+  // escalates to KILL after two seconds; each Process's exited signal then
+  // confirms the tree is reaped. Start sites all refuse to start while
+  // running is true, so no helper is replaced before its acknowledgement.
+  function cancelHelpers() {
+    pointerProc.cancelled = true
+    root.cancelHelper(pointerProc)
+    root.cancelHelper(providerProc)
+    root.cancelHelper(guardProc)
     root.providerQueue = []
+    root.guardsPending = false
+  }
+
+  Component.onDestruction: root.cancelHelpers()
+
+  function close() {
+    root.cancelHelpers()
     root.opened = false
     root.panes = []
     root.paneGeometry = []
@@ -676,8 +718,8 @@ Item {
   // `omarchy-shell shell call omarchy.menu <verb>`, so standing in for the
   // built-in menu means answering to them as well.
   function refresh() {
-    defaultMenuFile.reload()
-    userMenuFile.reload()
+    root.boundedMenuRead(defaultMenuReader)
+    root.boundedMenuRead(userMenuReader)
     root.providersLoaded = ({})
     root.evaluateGuards()
     root.loadProvidersForOpenPanes()
@@ -778,24 +820,78 @@ Item {
 
   // ------------------------------------------------------------- sources
 
-  FileView {
-    id: defaultMenuFile
-    path: root.defaultMenuPath
-    watchChanges: true
-    printErrors: false
-    onFileChanged: reload()
-    onLoaded: { root.defaultItems = root.parseMenuText(text()); root.rebuild() }
-    onLoadFailed: { root.defaultItems = []; root.rebuild() }
+  // The FileViews only watch; they never load. Reading goes through a
+  // bounded helper instead, so an oversized menu file is truncated by head
+  // at the producer — before any allocation in the resident shell — and the
+  // helper refuses symlinks and non-regular files before opening. A read
+  // that comes back over the cap or from a rejected path yields an empty
+  // item list (fail closed), never a partial parse.
+  function menuReadScript(path) {
+    var q = root.shellQuoted(path)
+    return "[[ -f " + q + " && ! -L " + q + " ]] || exit 3\n"
+      + "exec /usr/bin/head -c " + (root.maxMenuFileBytes + 1) + " -- " + q
+  }
+
+  function boundedMenuRead(proc) {
+    if (proc.running) { proc.readPending = true; return }
+    proc.readPending = false
+    proc.command = root.helperCommand(5, root.menuReadScript(proc.menuPath))
+    proc.running = true
+  }
+
+  component MenuReadProcess: Process {
+    id: reader
+    property string menuPath: ""
+    property var apply: null
+    property bool readPending: false
+    stdout: StdioCollector {
+      // The producer is capped by head, so this collector can never be
+      // handed more than maxMenuFileBytes + 1 bytes.
+      onStreamFinished: {
+        if (reader.apply) reader.apply(root.parseMenuText(text))
+        root.rebuild()
+      }
+    }
+    onExited: function(exitCode, exitStatus) {
+      if (exitCode !== 0 || exitStatus !== 0) {
+        if (reader.apply) reader.apply([])
+        root.rebuild()
+      }
+      if (reader.readPending) Qt.callLater(function() { root.boundedMenuRead(reader) })
+    }
+  }
+
+  MenuReadProcess {
+    id: defaultMenuReader
+    menuPath: root.defaultMenuPath
+    apply: function(items) { root.defaultItems = items }
+  }
+
+  MenuReadProcess {
+    id: userMenuReader
+    menuPath: root.userMenuPath
+    apply: function(items) { root.userItems = items }
   }
 
   FileView {
-    id: userMenuFile
-    path: root.userMenuPath
+    path: root.defaultMenuPath
+    preload: false
     watchChanges: true
     printErrors: false
-    onFileChanged: reload()
-    onLoaded: { root.userItems = root.parseMenuText(text()); root.rebuild() }
-    onLoadFailed: { root.userItems = []; root.rebuild() }
+    onFileChanged: root.boundedMenuRead(defaultMenuReader)
+  }
+
+  FileView {
+    path: root.userMenuPath
+    preload: false
+    watchChanges: true
+    printErrors: false
+    onFileChanged: root.boundedMenuRead(userMenuReader)
+  }
+
+  Component.onCompleted: {
+    root.boundedMenuRead(defaultMenuReader)
+    root.boundedMenuRead(userMenuReader)
   }
 
   // -------------------------------------------------------------- guards
@@ -820,7 +916,7 @@ Item {
       return
     }
     guardProc.collected = ""
-    guardProc.command = root.helperCommand(10, script)
+    guardProc.command = root.helperPipeline(10, script, root.maxHelperBytes)
     guardProc.running = true
   }
 
@@ -828,15 +924,18 @@ Item {
     id: guardProc
     property string collected: ""
     stdout: SplitParser {
+      // Bounded upstream by the head stage in helperPipeline; this cap is a
+      // second layer, not the enforcement point.
       onRead: function(data) {
         if (guardProc.collected.length > root.maxHelperBytes) { guardProc.running = false; return }
         guardProc.collected += data + "\n"
       }
     }
     onExited: function(exitCode, exitStatus) {
-      // A killed batch only reported the rows it reached. Keep the last
-      // complete answer rather than let a partial one hide things at random.
-      if (exitCode !== 0 || exitStatus !== 0) {
+      // A killed batch only reported the rows it reached, and output that
+      // hit the byte ceiling arrived truncated. Keep the last complete
+      // answer rather than let a partial one hide things at random.
+      if (exitCode !== 0 || exitStatus !== 0 || guardProc.collected.length > root.maxHelperBytes) {
         if (root.guardsPending) Qt.callLater(function() { root.evaluateGuards() })
         return
       }
@@ -927,7 +1026,7 @@ Item {
     providerProc.menuId = menuId
     providerProc.providerKey = entry.provider
     providerProc.collected = ""
-    providerProc.command = root.helperCommand(15, spec.script)
+    providerProc.command = root.helperPipeline(15, spec.script, root.maxHelperBytes)
     providerProc.running = true
   }
 
@@ -1044,13 +1143,18 @@ Item {
     property string providerKey: ""
     property string collected: ""
     stdout: SplitParser {
+      // Bounded upstream by the head stage in helperPipeline; this cap is a
+      // second layer, not the enforcement point.
       onRead: function(data) {
         if (providerProc.collected.length > root.maxHelperBytes) { providerProc.running = false; return }
         providerProc.collected += data + "\n"
       }
     }
     onExited: function(exitCode, exitStatus) {
-      if (exitCode === 0 && exitStatus === 0)
+      // Output that hit the byte ceiling arrived truncated: discard it and
+      // let the submenu retry, rather than merge a half list.
+      if (exitCode === 0 && exitStatus === 0
+          && providerProc.collected.length <= root.maxHelperBytes)
         root.mergeProviderRows(providerProc.collected, providerProc.menuId, providerProc.providerKey)
       else
         root.markProviderLoaded(providerProc.menuId, false)
@@ -1076,20 +1180,29 @@ Item {
   Process {
     id: pointerProc
     property string route: "root"
-    command: root.helperCommand(3, "hyprctl -j cursorpos; echo '@@'; hyprctl -j monitors")
+    property bool cancelled: false
+    // Bounded by the head stage in helperPipeline: the collector can never
+    // be handed more than maxProbeBytes + 1 bytes.
+    command: root.helperPipeline(3, "hyprctl -j cursorpos; echo '@@'; hyprctl -j monitors", root.maxProbeBytes)
     stdout: StdioCollector {
-      onStreamFinished: root.openAtProbedPointer(text)
+      onStreamFinished: {
+        if (!pointerProc.cancelled) root.openAtProbedPointer(text)
+      }
     }
   }
 
   function openAtPointer(route) {
     if (pointerProc.running) return
+    pointerProc.cancelled = false
     pointerProc.route = root.boundText(route || "root", 200)
     pointerProc.running = true
   }
 
   function openAtProbedPointer(text) {
-    var parts = String(text || "").slice(0, root.maxProbeBytes).split("@@")
+    // Over the ceiling means truncated hyprctl output: fail closed, do not
+    // open a menu from a half-parsed monitor list.
+    if (String(text || "").length > root.maxProbeBytes) return
+    var parts = String(text || "").split("@@")
     var cursor = null
     var monitors = []
     try { cursor = JSON.parse(parts[0]) } catch (e) { cursor = null }
