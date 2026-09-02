@@ -246,7 +246,7 @@ Item {
       var out = rows.slice(0, root.appsShown)
       out.push({
         id: menuId + ".__more", parent: menuId, kind: "hint",
-        icon: "\U000f0349", iconFont: "", appIcon: "", appId: "",
+        icon: "\uDB80\uDF49", iconFont: "", appIcon: "", appId: "",
         label: "type to search " + (rows.length - root.appsShown) + " more",
         title: "", target: "", description: "", action: "", provider: "",
         aliases: [], when: "", checked: "", order: 0
