@@ -95,6 +95,7 @@ Item {
   readonly property bool centeredLayout: String(root.setting("layoutStyle", "centered")) !== "anchored"
   readonly property bool escClosesAll: root.setting("escClosesAll", true) !== false
   readonly property bool hoverSelects: root.setting("hoverSelects", false) === true
+  readonly property int appsShown: Math.max(0, Number(root.setting("appsShown", 12)) || 0)
   readonly property bool desktopRightClick: root.setting("desktopRightClick", true) !== false
   readonly property bool wallpaperDoubleClick: root.setting("wallpaperDoubleClick", true) !== false
   readonly property bool inlineApps: root.setting("inlineApps", true) !== false
@@ -208,11 +209,10 @@ Item {
     var spec = root.panes[depth]
     if (!spec) return []
 
-    var rows = root.rowsFor(spec.menuId)
     // The deepest pane filters by the live type-ahead; parents keep showing
     // the filter that was parked on them when their submenu opened.
     var filter = depth === root.panes.length - 1 ? root.filterText : String(spec.filter || "")
-    if (!filter) return rows
+    if (!filter) return root.displayRows(spec.menuId)
 
     // Typing searches the whole subtree under this pane, not just its own
     // rows: "emby" at the root finds the app inside Apps, "theme" finds the
@@ -232,6 +232,28 @@ Item {
       if (matched) out.push(entry)
     }
     return out
+  }
+
+  // What a pane shows when it is not being searched: provider-filled
+  // submenus (Apps above all, fonts too) are shortlisted to the top
+  // `appsShown` entries — the provider already ranks them — with a muted
+  // hint row pointing at the type-ahead for the rest. Searching always
+  // covers the full set.
+  function displayRows(menuId) {
+    var rows = rowsFor(menuId)
+    var entry = root.item(menuId)
+    if (root.appsShown > 0 && entry && entry.provider && rows.length > root.appsShown) {
+      var out = rows.slice(0, root.appsShown)
+      out.push({
+        id: menuId + ".__more", parent: menuId, kind: "hint",
+        icon: "\U000f0349", iconFont: "", appIcon: "", appId: "",
+        label: "type to search " + (rows.length - root.appsShown) + " more",
+        title: "", target: "", description: "", action: "", provider: "",
+        aliases: [], when: "", checked: "", order: 0
+      })
+      return out
+    }
+    return rows
   }
 
   // Whether `entry` sits anywhere under `menuId` (its parent chain reaches
@@ -1505,8 +1527,11 @@ Item {
                 text: row.entry ? MenuModel.labelFor(row.entry, root.checkedResults) : ""
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.heading
-                font.weight: Font.Medium
-                color: row.active ? root.selectedText : root.foreground
+                font.weight: row.entry && row.entry.kind === "hint" ? Font.Normal : Font.Medium
+                font.italic: row.entry ? row.entry.kind === "hint" : false
+                color: row.entry && row.entry.kind === "hint"
+                  ? Qt.darker(root.foreground, 1.5)
+                  : (row.active ? root.selectedText : root.foreground)
                 elide: Text.ElideRight
               }
 
@@ -1543,7 +1568,7 @@ Item {
     id: ghost
     required property var panelItem
 
-    readonly property var ghostRows: root.ghostMenuId ? root.rowsFor(root.ghostMenuId) : []
+    readonly property var ghostRows: root.ghostMenuId ? root.displayRows(root.ghostMenuId) : []
 
     width: root.paneWidth
     height: Math.min(
@@ -1588,6 +1613,7 @@ Item {
           height: root.rowHeight
 
           Text {
+            visible: !gEntry || gEntry.kind !== "app"
             anchors.left: parent.left
             anchors.leftMargin: Style.spacing.sm
             anchors.verticalCenter: parent.verticalCenter
@@ -1597,6 +1623,20 @@ Item {
             font.family: (gEntry && gEntry.iconFont) ? gEntry.iconFont : root.fontFamily
             font.pixelSize: Style.font.heading
             color: Color.muted
+          }
+
+          Image {
+            visible: gEntry && gEntry.kind === "app"
+            width: Style.font.iconLarge
+            height: Style.font.iconLarge
+            anchors.left: parent.left
+            anchors.leftMargin: Style.spacing.sm + (root.iconColumn - width) / 2
+            anchors.verticalCenter: parent.verticalCenter
+            fillMode: Image.PreserveAspectFit
+            asynchronous: true
+            sourceSize.width: width * Screen.devicePixelRatio
+            sourceSize.height: height * Screen.devicePixelRatio
+            source: (gEntry && gEntry.kind === "app" && root.appLibrary) ? root.appLibrary.iconSource(gEntry.appIcon) : ""
           }
           Text {
             anchors.left: parent.left

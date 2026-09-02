@@ -35,7 +35,8 @@
       "summonPlacement": "center",
       "escClosesAll": true,
       "hoverSelects": false,
-      "layoutStyle": "centered"
+      "layoutStyle": "centered",
+      "appsShown": 12
     },
     "schema": [
       {
@@ -128,6 +129,16 @@
         "label": "Right-click on the bar button runs",
         "defaultValue": "xdg-terminal-exec",
         "description": "What a right-click on the bar button does. Matches the built-in Omarchy menu button, which opens a terminal. Empty to do nothing."
+      },
+      {
+        "key": "appsShown",
+        "type": "integer",
+        "label": "Apps shown before search",
+        "min": 0,
+        "max": 40,
+        "step": 1,
+        "defaultValue": 12,
+        "description": "Provider-filled submenus (Apps, fonts) list only this many top entries, ranked the way the launcher ranks them, with a hint row for the rest \u2014 typing searches the full set. 0 shows everything and scrolls."
       }
     ]
   }
