@@ -1383,7 +1383,9 @@ Item {
           opacity: !root.animations || entered || root.centeredLayout ? 1 : 0
 
           transform: Translate {
-            x: root.animations && root.centeredLayout && !pane.entered
+            // Only submenu panes slide in from the ghost slot; the root pane
+            // of a fresh summon appears in place, without movement.
+            x: root.animations && root.centeredLayout && !pane.entered && index > 0
               ? root.paneWidth + Style.space(12) : 0
             Behavior on x {
               enabled: root.animations
