@@ -653,7 +653,10 @@ Item {
       root.selectedIndex = 0
       event.accepted = true
     } else if (event.key === Qt.Key_End) {
-      root.selectedIndex = root.visibleRows(root.panes.length - 1).length - 1
+      var endRows = root.visibleRows(root.panes.length - 1)
+      var endAt = endRows.length - 1
+      while (endAt > 0 && endRows[endAt] && endRows[endAt].kind === "hint") endAt -= 1
+      root.selectedIndex = endAt
       event.accepted = true
     } else if (event.key === Qt.Key_Right) {
       var entry = root.selectedEntry()
@@ -1208,7 +1211,22 @@ Item {
       Loader {
         active: root.centeredLayout && root.animations && root.ghostMenuId !== ""
           && root.exitSnapshot === null && !root.paneEntering
-        sourceComponent: GhostPane { panelItem: panel }
+        sourceComponent: GhostPane {
+          panelItem: panel
+
+          // The preview is the selected row's submenu, so clicking it is
+          // the same gesture as pressing Right: promote it to a real pane
+          // (falling through would hit click-away and dismiss the menu).
+          MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.LeftButton
+            cursorShape: Qt.PointingHandCursor
+            onClicked: function(mouse) {
+              root.activateSelected()
+              mouse.accepted = true
+            }
+          }
+        }
       }
 
       // A pane closed by walking back is demoted, not discarded: it slides
@@ -1393,10 +1411,10 @@ Item {
             return root.selectedIndex
           }
 
-          onXChanged: root.notePaneGeometry(index, x, y, list.contentY)
-          onYChanged: root.notePaneGeometry(index, x, y, list.contentY)
+          onXChanged: if (panel.visible) root.notePaneGeometry(index, x, y, list.contentY)
+          onYChanged: if (panel.visible) root.notePaneGeometry(index, x, y, list.contentY)
           Component.onCompleted: {
-            root.notePaneGeometry(index, x, y, list.contentY)
+            if (panel.visible) root.notePaneGeometry(index, x, y, list.contentY)
             pane.entered = true
           }
 
@@ -1451,7 +1469,7 @@ Item {
             model: pane.rows.length
             boundsBehavior: Flickable.StopAtBounds
             interactive: contentHeight > height
-            onContentYChanged: root.notePaneGeometry(pane.index, pane.x, pane.y, contentY)
+            onContentYChanged: if (panel.visible) root.notePaneGeometry(pane.index, pane.x, pane.y, contentY)
 
             Connections {
               target: root
