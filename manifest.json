@@ -44,7 +44,7 @@
         "type": "boolean",
         "label": "Animations",
         "defaultValue": true,
-        "description": "Pane entrances grow out of their anchor and the selection highlight glides between rows with a caelestia-style stretch. Off restores the instant behavior of the original context menus."
+        "description": "Pane entrances, the sliding centered chain, ghost previews, and the gliding selection highlight. Off restores the instant behavior of the original context menus."
       },
       {
         "key": "layoutStyle",
