@@ -324,6 +324,8 @@ Item {
     root.paneGeometry = []
     root.panes = [spec]
     root.searchProvidersLoaded = false
+    exitClear.stop()
+    root.exitSnapshot = null
     root.opened = true
     // Guards are cheap and their answers go stale (is a recording running? is
     // night light on?), so re-run them each time the menu is summoned rather
@@ -520,6 +522,11 @@ Item {
     })
     root.paneGeometry = root.paneGeometry.slice(0, depth + 1)
     root.panes = next
+    // A quick forward while a demoted pane is still sliding into the ghost
+    // slot would show two children at once — the new pane takes that slot
+    // now, so the stand-in yields immediately.
+    exitClear.stop()
+    root.exitSnapshot = null
     root.noteEntering()
     root.loadProvider(target)
     return true
