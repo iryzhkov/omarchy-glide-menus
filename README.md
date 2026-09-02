@@ -8,6 +8,8 @@ reading `omarchy-menu.jsonc` plus your user extension, so entries, `when:`
 guards and ✓ marks never drift from the built-in menu — and reworks the
 interaction around a centered, animated cascade.
 
+![Demo](demo.gif)
+
 ## What it does
 
 - **Centered cascade.** The pane you are using always sits mid-screen, so
@@ -35,6 +37,11 @@ interaction around a centered, animated cascade.
 - Escape closes the whole cascade; Left, Backspace (on an empty filter),
   and right-click walk back one pane. Hover selection is off by default
   and available as a setting.
+
+Three levels deep — the active pane stays centered, ancestors trail off
+the left edge, and the fonts shortlist ends in a search hint:
+
+![Cascade](screenshot-cascade.png)
 
 ## Install
 

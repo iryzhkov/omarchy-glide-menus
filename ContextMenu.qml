@@ -102,6 +102,11 @@ Item {
 
   property bool opened: false
 
+  // Normally the open menu grabs the keyboard (Exclusive layer focus).
+  // Scripted demos and tests can release the grab and drive the menu over
+  // IPC instead: omarchy-shell glideMenu nav 1 / enter / back.
+  property bool grabKeyboard: true
+
   // Which screen the menu belongs to, and where on it it was summoned. Only
   // the panel for that screen draws anything, so a right-click on the left
   // monitor does not open a menu on the right one.
@@ -1075,6 +1080,24 @@ Item {
       else root.openAtPointer("root")
     }
 
+    // Scripted navigation, equivalent to the arrow keys and Enter. Useful
+    // for demos and automated tests; goes through the same code paths.
+    function nav(delta: int): void {
+      root.moveSelection(Number(delta) || 0)
+    }
+
+    function enter(): void {
+      root.activateSelected()
+    }
+
+    function back(): void {
+      root.goBack()
+    }
+
+    function setGrab(on: string): void {
+      root.grabKeyboard = String(on) !== "false"
+    }
+
     function close(): void {
       root.dismiss()
     }
@@ -1173,7 +1196,7 @@ Item {
 
       WlrLayershell.namespace: "omarchy-context-menu"
       WlrLayershell.layer: WlrLayer.Overlay
-      WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
+      WlrLayershell.keyboardFocus: root.grabKeyboard ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
       exclusionMode: ExclusionMode.Ignore
 
       // Click-away. No scrim: a context menu should not dim the desktop it is
