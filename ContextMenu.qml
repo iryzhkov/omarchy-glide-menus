@@ -1178,11 +1178,19 @@ Item {
           readonly property real centeredX: (panel.width - width) / 2
             - (root.panes.length - 1 - index) * (root.paneWidth + Style.space(12))
 
+          // Vertical position comes from the pane's natural (unfiltered)
+          // height, not its live height: the top edge — and with it the
+          // type-ahead input — stays put while a search changes the row
+          // count, and the pane only grows or shrinks downward.
+          readonly property real naturalHeight: Math.min(
+            Math.max(root.rowsFor(spec.menuId).length, 1) * root.rowHeight + root.panePadding * 2,
+            panel.height - Style.gapsOut * 2)
+
           x: root.centeredLayout
             ? centeredX
             : Math.max(Style.gapsOut, overflowsRight ? alternateX : baseX)
           y: root.centeredLayout
-            ? Math.max(Style.gapsOut, (panel.height - height) / 2)
+            ? Math.max(Style.gapsOut, (panel.height - naturalHeight) / 2)
             : Math.max(Style.gapsOut, Math.min(baseY, panel.height - height - Style.gapsOut))
 
           // Geometry settles for a beat before the slide Behaviors arm: a
@@ -1212,7 +1220,9 @@ Item {
           width: root.paneWidth
           height: Math.min(
             headerHeight + Math.max(rows.length, 1) * root.rowHeight + root.panePadding * 2,
-            panel.height - Style.gapsOut * 2)
+            root.centeredLayout
+              ? panel.height - y - Style.gapsOut
+              : panel.height - Style.gapsOut * 2)
 
           radius: root.cornerRadius
           color: root.background
