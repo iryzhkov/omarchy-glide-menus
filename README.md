@@ -1,7 +1,7 @@
 # Glide menus
 
-The whole Omarchy menu as a keyboard-first cascading menu with
-caelestia-style motion. A fork of
+The whole Omarchy menu as a keyboard-first cascading menu with clean,
+centered motion. A fork of
 [Cantina's context menus](https://github.com/cantinalabs/omarchy-context-menus)
 that keeps its menu model — a verbatim copy of Omarchy's own `MenuModel.js`
 reading `omarchy-menu.jsonc` plus your user extension, so entries, `when:`

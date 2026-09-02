@@ -5,7 +5,7 @@
   "version": "1.1.0",
   "author": "Igor Ryzhkov",
   "license": "MIT",
-  "description": "Cantina's cascading context menus with caelestia-style motion: panes grow out of their anchor and the selection highlight glides between rows. Right-click the desktop, click the bar button, or press a key over any window.",
+  "description": "Cantina's cascading context menus reworked around clean, centered motion: the pane in use stays mid-screen, ghost panes preview submenus before you enter, the selection glides between rows, and typing searches the whole menu tree.",
   "kinds": [
     "menu",
     "bar-widget"
