@@ -422,7 +422,7 @@ Item {
   property var exitSnapshot: null
   Timer {
     id: exitClear
-    interval: 360
+    interval: 480
     repeat: false
     onTriggered: root.exitSnapshot = null
   }
@@ -442,11 +442,10 @@ Item {
       reopenGuard.restart()
       if (root.centeredLayout && root.animations && root.opened) {
         var closingGeo = root.geometryFor(depth)
-        var snap = { menuId: String(root.panes[depth].menuId), y: closingGeo.y }
-        // Null first so the Loader reloads and the slide restarts even when
-        // a previous exit is still mid-flight.
-        root.exitSnapshot = null
-        Qt.callLater(function() { root.exitSnapshot = snap; exitClear.restart() })
+        // Assigned synchronously: the stand-in must exist in the very frame
+        // the real pane is destroyed or the hand-off reads as a blink.
+        root.exitSnapshot = { menuId: String(root.panes[depth].menuId), y: closingGeo.y }
+        exitClear.restart()
       }
     }
     var next = root.panes.slice(0, depth)
@@ -1191,6 +1190,7 @@ Item {
         sourceComponent: GhostPane {
           panelItem: panel
           menuId: root.exitSnapshot ? root.exitSnapshot.menuId : ""
+          dimmed: false
           z: -1
 
           property bool gone: false
@@ -1201,10 +1201,12 @@ Item {
           opacity: gone ? 0 : 1
 
           Behavior on x {
-            NumberAnimation { duration: 300; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.38, 1.21, 0.22, 1.0, 1, 1] }
+            NumberAnimation { duration: 380; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.38, 1.21, 0.22, 1.0, 1, 1] }
           }
           Behavior on opacity {
-            NumberAnimation { duration: 260; easing.type: Easing.BezierSpline; easing.bezierCurve: [0, 0, 0, 1, 1, 1] }
+            // Accelerating curve: stays visible through most of the slide
+            // and lets the motion, not the fade, carry the exit.
+            NumberAnimation { duration: 420; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.6, 0, 1, 0.45, 1, 1] }
           }
         }
       }
@@ -1616,6 +1618,9 @@ Item {
     // Which submenu to render; instances may override position and opacity
     // (the exit snapshot reuses this component to slide a closed pane away).
     property string menuId: root.ghostMenuId
+    // Preview instances render muted; the exit stand-in wears the real
+    // pane's colors so the hand-off is seamless.
+    property bool dimmed: true
 
     readonly property var ghostRows: ghost.menuId ? root.displayRows(ghost.menuId) : []
 
@@ -1673,7 +1678,7 @@ Item {
             text: gEntry ? gEntry.icon : ""
             font.family: (gEntry && gEntry.iconFont) ? gEntry.iconFont : root.fontFamily
             font.pixelSize: Style.font.heading
-            color: Color.muted
+            color: ghost.dimmed ? Color.muted : root.foreground
           }
 
           Image {
@@ -1698,7 +1703,7 @@ Item {
             text: gEntry ? MenuModel.labelFor(gEntry, root.checkedResults) : ""
             font.family: root.fontFamily
             font.pixelSize: Style.font.heading
-            color: Color.muted
+            color: ghost.dimmed ? Color.muted : root.foreground
             elide: Text.ElideRight
           }
 
@@ -1711,7 +1716,7 @@ Item {
             text: "\u203a"
             font.family: root.fontFamily
             font.pixelSize: Style.font.heading
-            color: Color.muted
+            color: ghost.dimmed ? Color.muted : root.foreground
           }
         }
       }
