@@ -88,6 +88,9 @@ Item {
   }
 
   readonly property bool animations: root.setting("animations", true) !== false
+  readonly property bool summonCentered: String(root.setting("summonPlacement", "center")) !== "pointer"
+  readonly property bool escClosesAll: root.setting("escClosesAll", true) !== false
+  readonly property bool hoverSelects: root.setting("hoverSelects", true) !== false
   readonly property bool desktopRightClick: root.setting("desktopRightClick", true) !== false
   readonly property bool wallpaperDoubleClick: root.setting("wallpaperDoubleClick", true) !== false
   readonly property bool inlineApps: root.setting("inlineApps", true) !== false
@@ -321,15 +324,22 @@ Item {
     // type-ahead, so walking back up the cascade restores the same filtered
     // view that was left behind.
     var restored = ""
-    if (depth > 0 && next[depth - 1] && next[depth - 1].filter) {
-      restored = String(next[depth - 1].filter)
-      next[depth - 1] = Object.assign({}, next[depth - 1])
-      delete next[depth - 1].filter
+    var restoredSel = -1
+    if (depth > 0 && next[depth - 1]) {
+      var parked = next[depth - 1]
+      if (parked.filter) restored = String(parked.filter)
+      if (parked.sel !== undefined) restoredSel = Number(parked.sel)
+      if (parked.filter !== undefined || parked.sel !== undefined) {
+        next[depth - 1] = Object.assign({}, parked)
+        delete next[depth - 1].filter
+        delete next[depth - 1].sel
+      }
     }
     root.panes = next
     root.paneGeometry = root.paneGeometry.slice(0, depth)
     root.filterText = restored
-    root.selectedIndex = restored ? 0 : -1
+    // Land back on the row the submenu was opened from, not at the top.
+    root.selectedIndex = restoredSel
   }
 
   function openChild(depth, entry, paneX, paneY, rowY) {
@@ -344,10 +354,15 @@ Item {
     if (root.panes.length > depth + 1 && root.panes[depth + 1].menuId === target) return false
 
     var next = root.panes.slice(0, depth + 1)
-    // Park the live type-ahead on this pane before descending, so the
-    // filtered view survives a walk back up (see truncate).
-    if (root.filterText)
-      next[depth] = Object.assign({}, next[depth], { filter: root.filterText })
+    // Park the live type-ahead and the row we are descending from on this
+    // pane, so a walk back up restores both the filtered view and the
+    // selection (see truncate).
+    var parked = { filter: root.filterText || "" }
+    var fromRows = root.visibleRows(depth)
+    for (var fr = 0; fr < fromRows.length; fr++) {
+      if (fromRows[fr] === entry || fromRows[fr].id === entry.id) { parked.sel = fr; break }
+    }
+    next[depth] = Object.assign({}, next[depth], parked)
     root.filterText = ""
     next.push({
       menuId: target,
@@ -465,7 +480,8 @@ Item {
 
   function handleKey(event) {
     if (event.key === Qt.Key_Escape) {
-      root.goBack()
+      if (root.escClosesAll) root.dismiss()
+      else root.goBack()
       event.accepted = true
     } else if (event.key === Qt.Key_Down || (event.key === Qt.Key_Tab && !(event.modifiers & Qt.ShiftModifier))) {
       root.moveSelection(1)
@@ -848,6 +864,19 @@ Item {
       localY = (chosen.height / fallbackScale) / 2
     }
 
+    // Summoned by key or IPC: place the first pane mid-screen rather than
+    // under the pointer when so configured. The desktop right-click path
+    // never comes through here, so it keeps opening at the click.
+    if (root.summonCentered) {
+      var cScale = chosen.scale || 1
+      var cRotated = (Number(chosen.transform) || 0) % 2 === 1
+      var cWidth = (cRotated ? chosen.height : chosen.width) / cScale
+      var cHeight = (cRotated ? chosen.width : chosen.height) / cScale
+      var approxH = Math.max(1, root.rowsFor("root").length) * root.rowHeight + root.panePadding * 2
+      localX = Math.max(Style.gapsOut, cWidth / 2 - root.paneWidth / 2)
+      localY = Math.max(Style.gapsOut, cHeight / 2 - approxH / 2)
+    }
+
     if (pointerProc.route && pointerProc.route !== "root")
       root.openAtRoute(String(chosen.name), localX, localY, pointerProc.route)
     else
@@ -1202,6 +1231,7 @@ Item {
                 // A short dwell keeps a diagonal sweep toward an open submenu
                 // from tearing it down on the way past.
                 onHoveredChanged: {
+                  if (!root.hoverSelects) return
                   if (hovered) {
                     if (pane.deepest) root.selectedIndex = row.index
                     dwell.restart()
@@ -1222,8 +1252,18 @@ Item {
                                    row.y - list.contentY + root.panePadding + pane.headerHeight)
                   } else {
                     // A leaf: everything deeper than this pane is stale.
+                    // Truncating restores this pane's parked filter, which can
+                    // reshuffle (or destroy) the delegates — so resolve the
+                    // hovered entry again instead of trusting row.index.
+                    var hoveredEntry = row.entry
                     root.truncate(pane.index + 1)
-                    root.selectedIndex = row.index
+                    var newRows = root.visibleRows(pane.index)
+                    for (var nr = 0; nr < newRows.length; nr++) {
+                      if (newRows[nr] === hoveredEntry || newRows[nr].id === hoveredEntry.id) {
+                        root.selectedIndex = nr
+                        break
+                      }
+                    }
                   }
                 }
               }

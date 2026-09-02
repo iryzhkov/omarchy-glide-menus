@@ -31,7 +31,10 @@
       "submenuDelay": 140,
       "paneWidth": 268,
       "rightClickCommand": "xdg-terminal-exec",
-      "animations": true
+      "animations": true,
+      "summonPlacement": "center",
+      "escClosesAll": true,
+      "hoverSelects": true
     },
     "schema": [
       {
@@ -40,6 +43,31 @@
         "label": "Animations",
         "defaultValue": true,
         "description": "Pane entrances grow out of their anchor and the selection highlight glides between rows with a caelestia-style stretch. Off restores the instant behavior of the original context menus."
+      },
+      {
+        "key": "summonPlacement",
+        "type": "enum",
+        "label": "Keybinding opens the menu",
+        "options": [
+          "center",
+          "pointer"
+        ],
+        "defaultValue": "center",
+        "description": "Where a keybinding or IPC summon places the menu: the middle of the focused screen, or under the pointer. The desktop right-click always opens at the click."
+      },
+      {
+        "key": "escClosesAll",
+        "type": "boolean",
+        "label": "Escape closes the whole menu",
+        "defaultValue": true,
+        "description": "Escape dismisses the entire cascade. Off makes Escape walk back one pane at a time (clearing the type-ahead first), like the original context menus; Left arrow and right-click always walk back."
+      },
+      {
+        "key": "hoverSelects",
+        "type": "boolean",
+        "label": "Hover moves the selection",
+        "defaultValue": true,
+        "description": "Pointer hover moves the selection and opens submenus after the dwell delay. Off leaves selection to the keyboard and opens submenus only on click."
       },
       {
         "key": "desktopRightClick",
