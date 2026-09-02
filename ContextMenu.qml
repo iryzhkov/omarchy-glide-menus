@@ -1222,7 +1222,7 @@ Item {
           opacity: gone ? 0 : 1
 
           Behavior on x {
-            NumberAnimation { duration: 380; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.38, 1.21, 0.22, 1.0, 1, 1] }
+            NumberAnimation { duration: 340; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.05, 0, 0.133, 0.06, 0.167, 0.4, 0.208, 0.82, 0.25, 1, 1, 1] }
           }
           Behavior on opacity {
             // Accelerating curve: stays visible through most of the slide
@@ -1312,15 +1312,15 @@ Item {
 
           Behavior on x {
             enabled: root.animations && root.centeredLayout && pane.geometrySettled
-            NumberAnimation { duration: 340; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.38, 1.21, 0.22, 1.0, 1, 1] }
+            NumberAnimation { duration: 340; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.05, 0, 0.133, 0.06, 0.167, 0.4, 0.208, 0.82, 0.25, 1, 1, 1] }
           }
           Behavior on y {
             enabled: root.animations && root.centeredLayout && pane.geometrySettled
-            NumberAnimation { duration: 340; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.38, 1.21, 0.22, 1.0, 1, 1] }
+            NumberAnimation { duration: 340; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.05, 0, 0.133, 0.06, 0.167, 0.4, 0.208, 0.82, 0.25, 1, 1, 1] }
           }
           Behavior on height {
             enabled: root.animations && root.centeredLayout && pane.geometrySettled
-            NumberAnimation { duration: 340; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.38, 1.21, 0.22, 1.0, 1, 1] }
+            NumberAnimation { duration: 340; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.05, 0, 0.133, 0.06, 0.167, 0.4, 0.208, 0.82, 0.25, 1, 1, 1] }
           }
 
           width: root.paneWidth
@@ -1354,7 +1354,7 @@ Item {
               ? root.paneWidth + Style.space(12) : 0
             Behavior on x {
               enabled: root.animations
-              NumberAnimation { duration: 340; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.38, 1.21, 0.22, 1.0, 1, 1] }
+              NumberAnimation { duration: 340; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.05, 0, 0.133, 0.06, 0.167, 0.4, 0.208, 0.82, 0.25, 1, 1, 1] }
             }
           }
           Behavior on scale {
