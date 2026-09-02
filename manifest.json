@@ -34,7 +34,8 @@
       "animations": true,
       "summonPlacement": "center",
       "escClosesAll": true,
-      "hoverSelects": true
+      "hoverSelects": true,
+      "layoutStyle": "centered"
     },
     "schema": [
       {
@@ -43,6 +44,17 @@
         "label": "Animations",
         "defaultValue": true,
         "description": "Pane entrances grow out of their anchor and the selection highlight glides between rows with a caelestia-style stretch. Off restores the instant behavior of the original context menus."
+      },
+      {
+        "key": "layoutStyle",
+        "type": "enum",
+        "label": "Cascade layout",
+        "options": [
+          "centered",
+          "anchored"
+        ],
+        "defaultValue": "centered",
+        "description": "\"centered\" keeps the pane you are using mid-screen and slides ancestors off to the right, so your eyes never travel. \"anchored\" is the original cascade growing sideways from the summon point."
       },
       {
         "key": "summonPlacement",

@@ -89,6 +89,10 @@ Item {
 
   readonly property bool animations: root.setting("animations", true) !== false
   readonly property bool summonCentered: String(root.setting("summonPlacement", "center")) !== "pointer"
+  // "centered": the deepest pane always sits mid-screen and ancestors slide
+  // off to the right; "anchored": the original cascade that grows from the
+  // summon point.
+  readonly property bool centeredLayout: String(root.setting("layoutStyle", "centered")) !== "anchored"
   readonly property bool escClosesAll: root.setting("escClosesAll", true) !== false
   readonly property bool hoverSelects: root.setting("hoverSelects", true) !== false
   readonly property bool desktopRightClick: root.setting("desktopRightClick", true) !== false
@@ -319,6 +323,18 @@ Item {
 
   // Truncate the cascade to `depth` panes. Used when the pointer moves to a
   // different row, so stale submenus close instead of piling up.
+  // The submenu the current selection points at, previewed as a translucent
+  // ghost pane beside the active one before it is entered. Follows keyboard
+  // selection and (when hover selects) the pointer.
+  readonly property string ghostMenuId: {
+    if (!opened || panes.length === 0 || selectedIndex < 0) return ""
+    var rows = visibleRows(panes.length - 1)
+    var entry = rows[selectedIndex]
+    if (!entry || !isSubmenu(entry)) return ""
+    return targetOf(entry)
+  }
+  onGhostMenuIdChanged: if (ghostMenuId) loadProvider(ghostMenuId)
+
   // The submenu that was just closed by walking back, kept briefly so the
   // pointer landing back on its parent row does not hover-reopen it: the
   // child pane had the hover until it died, and the parent row regaining it
@@ -1056,6 +1072,14 @@ Item {
       // it back before there is anything to give it to.
       onVisibleChanged: if (visible) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
 
+      // Ghost preview of the submenu the selection points at, on the side
+      // the real pane will slide in from. Centered layout only; it fades
+      // and never takes input.
+      Loader {
+        active: root.centeredLayout && root.animations && root.ghostMenuId !== ""
+        sourceComponent: GhostPane { panelItem: panel }
+      }
+
       Repeater {
         model: root.panes.length
 
@@ -1085,8 +1109,28 @@ Item {
             ? anchorX - width
             : anchorX - width - root.paneWidth + Style.space(4)
 
-          x: Math.max(Style.gapsOut, overflowsRight ? alternateX : baseX)
-          y: Math.max(Style.gapsOut, Math.min(baseY, panel.height - height - Style.gapsOut))
+          // Centered layout: the pane being used stays mid-screen so the
+          // eyes never travel; each ancestor slides one slot to the right,
+          // the oldest walking off the edge. Depth changes animate as one
+          // sliding chain.
+          readonly property real centeredX: (panel.width - width) / 2
+            + (root.panes.length - 1 - index) * (root.paneWidth + Style.space(12))
+
+          x: root.centeredLayout
+            ? centeredX
+            : Math.max(Style.gapsOut, overflowsRight ? alternateX : baseX)
+          y: root.centeredLayout
+            ? Math.max(Style.gapsOut, (panel.height - height) / 2)
+            : Math.max(Style.gapsOut, Math.min(baseY, panel.height - height - Style.gapsOut))
+
+          Behavior on x {
+            enabled: root.animations && root.centeredLayout
+            NumberAnimation { duration: 340; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.38, 1.21, 0.22, 1.0, 1, 1] }
+          }
+          Behavior on y {
+            enabled: root.animations && root.centeredLayout
+            NumberAnimation { duration: 340; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.38, 1.21, 0.22, 1.0, 1, 1] }
+          }
 
           width: root.paneWidth
           height: Math.min(
@@ -1106,8 +1150,18 @@ Item {
           transformOrigin: spec.flipY === true
             ? (flippedXEffective ? Item.BottomRight : Item.BottomLeft)
             : (flippedXEffective ? Item.TopRight : Item.TopLeft)
-          scale: !root.animations || entered ? 1 : 0.85
-          opacity: !root.animations || entered ? 1 : 0
+          scale: !root.animations || entered || root.centeredLayout ? 1 : 0.85
+          opacity: !root.animations || entered
+            ? (root.centeredLayout && !deepest && root.panes.length > 1 ? 0.55 : 1)
+            : 0
+
+          transform: Translate {
+            x: root.animations && root.centeredLayout && !pane.entered ? -Style.space(28) : 0
+            Behavior on x {
+              enabled: root.animations
+              NumberAnimation { duration: 340; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.38, 1.21, 0.22, 1.0, 1, 1] }
+            }
+          }
           Behavior on scale {
             enabled: root.animations
             NumberAnimation { duration: 320; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.38, 1.21, 0.22, 1.0, 1, 1] }
@@ -1161,7 +1215,7 @@ Item {
               verticalAlignment: Text.AlignVCenter
               text: "󰍉  " + pane.paneFilter
               font.family: root.fontFamily
-              font.pixelSize: Style.font.body
+              font.pixelSize: Style.font.heading
               color: root.selectedText
               elide: Text.ElideRight
             }
@@ -1175,7 +1229,7 @@ Item {
             verticalAlignment: Text.AlignVCenter
             text: pane.filtering ? "No matches" : "…"
             font.family: root.fontFamily
-            font.pixelSize: Style.font.body
+            font.pixelSize: Style.font.heading
             color: Qt.darker(root.foreground, 1.5)
           }
 
@@ -1307,7 +1361,7 @@ Item {
                 horizontalAlignment: Text.AlignHCenter
                 text: row.entry ? row.entry.icon : ""
                 font.family: (row.entry && row.entry.iconFont) ? row.entry.iconFont : root.fontFamily
-                font.pixelSize: Style.font.body
+                font.pixelSize: Style.font.heading
                 color: row.active ? root.selectedText : root.foreground
               }
 
@@ -1336,7 +1390,8 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 text: row.entry ? MenuModel.labelFor(row.entry, root.checkedResults) : ""
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.body
+                font.pixelSize: Style.font.heading
+                font.weight: Font.Medium
                 color: row.active ? root.selectedText : root.foreground
                 elide: Text.ElideRight
               }
@@ -1349,7 +1404,7 @@ Item {
                 visible: row.submenu
                 text: "›"
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.subtitle
+                font.pixelSize: Style.font.heading
                 color: row.active ? root.selectedText : Qt.darker(root.foreground, 1.5)
               }
 
@@ -1364,6 +1419,67 @@ Item {
                 }
               }
             }
+          }
+        }
+      }
+    }
+  }
+
+  component GhostPane: BorderSurface {
+    id: ghost
+    required property var panelItem
+
+    readonly property var ghostRows: root.ghostMenuId ? root.rowsFor(root.ghostMenuId) : []
+
+    width: root.paneWidth
+    height: Math.min(
+      Math.max(ghostRows.length, 1) * root.rowHeight + root.panePadding * 2,
+      panelItem.height - Style.gapsOut * 2)
+    x: (panelItem.width - width) / 2 - (root.paneWidth + Style.space(12))
+    y: Math.max(Style.gapsOut, (panelItem.height - height) / 2)
+
+    radius: root.cornerRadius
+    color: root.background
+    borderSpec: root.borderSpec
+    clip: true
+    opacity: 0.35
+
+    Column {
+      anchors.fill: parent
+      anchors.margins: root.panePadding
+
+      Repeater {
+        model: Math.min(ghost.ghostRows.length, 14)
+
+        Item {
+          required property int index
+          readonly property var gEntry: ghost.ghostRows[index]
+
+          width: parent.width
+          height: root.rowHeight
+
+          Text {
+            anchors.left: parent.left
+            anchors.leftMargin: Style.spacing.sm
+            anchors.verticalCenter: parent.verticalCenter
+            width: root.iconColumn
+            horizontalAlignment: Text.AlignHCenter
+            text: gEntry ? gEntry.icon : ""
+            font.family: (gEntry && gEntry.iconFont) ? gEntry.iconFont : root.fontFamily
+            font.pixelSize: Style.font.heading
+            color: root.foreground
+          }
+          Text {
+            anchors.left: parent.left
+            anchors.leftMargin: Style.spacing.sm + root.iconColumn + Style.spacing.xs
+            anchors.right: parent.right
+            anchors.rightMargin: Style.spacing.sm
+            anchors.verticalCenter: parent.verticalCenter
+            text: gEntry ? MenuModel.labelFor(gEntry, root.checkedResults) : ""
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.heading
+            color: root.foreground
+            elide: Text.ElideRight
           }
         }
       }
