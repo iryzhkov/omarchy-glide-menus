@@ -92,11 +92,88 @@ Item {
   readonly property bool centeredLayout: String(root.setting("layoutStyle", "centered")) !== "anchored"
   readonly property bool escClosesAll: root.setting("escClosesAll", true) !== false
   readonly property bool hoverSelects: root.setting("hoverSelects", false) === true
-  readonly property int appsShown: Math.max(0, Number(root.setting("appsShown", 12)) || 0)
+  readonly property int appsShown: root.finiteNum(root.setting("appsShown", 12), 0, 100, 12)
   readonly property bool desktopRightClick: root.setting("desktopRightClick", true) !== false
   readonly property bool wallpaperDoubleClick: root.setting("wallpaperDoubleClick", true) !== false
   readonly property bool inlineApps: root.setting("inlineApps", true) !== false
-  readonly property int submenuDelay: Math.max(0, Number(root.setting("submenuDelay", 140)) || 0)
+  readonly property int submenuDelay: root.finiteNum(root.setting("submenuDelay", 140), 0, 2000, 140)
+
+  // ------------------------------------------------------ input hardening
+  //
+  // Everything that crosses into this file from outside — menu files, helper
+  // process output, IPC arguments, hand-edited settings — is bounded before
+  // it is parsed or rendered: byte caps before JSON parsing, row and field
+  // caps before entries join the model, finite range clamps on numbers.
+
+  readonly property int maxMenuFileBytes: 2000000
+  readonly property int maxModelItems: 10000
+  readonly property int maxFieldChars: 512
+  readonly property int maxHelperBytes: 1000000
+  readonly property int maxProviderRows: 2000
+  readonly property int maxAppRows: 3000
+  readonly property int maxProbeBytes: 262144
+  readonly property int maxFilterChars: 128
+
+  function boundText(value, max) {
+    var s = String(value === undefined || value === null ? "" : value)
+    return s.length > max ? s.slice(0, max) : s
+  }
+
+  function finiteNum(value, lo, hi, fallback) {
+    var n = Number(value)
+    if (!isFinite(n)) return fallback
+    return Math.min(hi, Math.max(lo, n))
+  }
+
+  // Cap entry count and every string field before parsed menu content joins
+  // the model.
+  function sanitizeEntries(list) {
+    if (!Array.isArray(list)) return []
+    var out = list.slice(0, root.maxModelItems)
+    var fields = ["id", "parent", "kind", "icon", "iconFont", "label", "title",
+                  "target", "description", "action", "provider", "when", "checked"]
+    for (var i = 0; i < out.length; i++) {
+      var e = out[i]
+      if (!e) continue
+      for (var f = 0; f < fields.length; f++) {
+        if (typeof e[fields[f]] === "string" && e[fields[f]].length > root.maxFieldChars)
+          e[fields[f]] = e[fields[f]].slice(0, root.maxFieldChars)
+      }
+      if (Array.isArray(e.aliases)) {
+        e.aliases = e.aliases.slice(0, 16)
+        for (var a = 0; a < e.aliases.length; a++)
+          e.aliases[a] = root.boundText(e.aliases[a], root.maxFieldChars)
+      }
+    }
+    return out
+  }
+
+  function parseMenuText(t) {
+    t = String(t || "")
+    if (t.length > root.maxMenuFileBytes) {
+      console.warn("glide-menus: menu source over " + root.maxMenuFileBytes + " bytes, ignoring")
+      return []
+    }
+    return root.sanitizeEntries(MenuModel.parseMenuJsonc(t))
+  }
+
+  // Helper scripts run through fixed absolute executables with a minimal
+  // explicit environment (no login shell, no inherited profile) and a hard
+  // deadline. GNU timeout puts the child in its own process group and
+  // signals the whole group, TERM then KILL, so the tree cannot outlive the
+  // deadline; Process reaps on exit.
+  function helperCommand(seconds, script) {
+    return ["/usr/bin/env", "-i",
+      "PATH=/usr/local/bin:/usr/bin:/bin",
+      "HOME=" + Quickshell.env("HOME"),
+      "USER=" + Quickshell.env("USER"),
+      "XDG_RUNTIME_DIR=" + Quickshell.env("XDG_RUNTIME_DIR"),
+      "HYPRLAND_INSTANCE_SIGNATURE=" + Quickshell.env("HYPRLAND_INSTANCE_SIGNATURE"),
+      "WAYLAND_DISPLAY=" + Quickshell.env("WAYLAND_DISPLAY"),
+      "OMARCHY_PATH=" + root.omarchyPath,
+      "/usr/bin/timeout", "--kill-after=2", String(seconds),
+      "/bin/bash", "-c", String(script)]
+  }
 
   // ---------------------------------------------------------------- state
 
@@ -169,7 +246,7 @@ Item {
   readonly property int cornerRadius: Style.cornerRadius
   readonly property string fontFamily: Style.font.menuFamily
 
-  readonly property int paneWidth: Style.space(Math.max(120, Number(root.setting("paneWidth", 300)) || 300))
+  readonly property int paneWidth: Style.space(root.finiteNum(root.setting("paneWidth", 300), 120, 520, 300))
   // Same row metric as the built-in menu card, so the two feel like one
   // family rather than a dense context menu next to an airy launcher.
   readonly property int rowHeight: Math.max(Style.space(50), Style.font.body + Style.spacing.rowPaddingX * 2)
@@ -317,11 +394,15 @@ Item {
   // ------------------------------------------------------------ lifetime
 
   function openAt(screenName, x, y) {
-    root.openPane(screenName, { menuId: "root", x: Number(x) || 0, y: Number(y) || 0 })
+    root.openPane(screenName, {
+      menuId: "root",
+      x: root.finiteNum(x, 0, 32768, 0),
+      y: root.finiteNum(y, 0, 32768, 0)
+    })
   }
 
   function openPane(screenName, spec) {
-    root.targetScreen = String(screenName || "")
+    root.targetScreen = root.boundText(screenName, 128)
     root.originX = spec.x
     root.originY = spec.y
     root.filterText = ""
@@ -342,8 +423,15 @@ Item {
   // Anchor the first pane to a rectangle rather than a point -- the bar button
   // hands us its own, and the menu cascades off whichever edge has the room.
   function openAtAnchor(screenName, x, y, w, h, placement) {
-    var spec = { menuId: "root", x: Number(x) || 0, y: Number(y) || 0, flipX: false, flipY: false }
-    var side = String(placement || "below")
+    var spec = {
+      menuId: "root",
+      x: root.finiteNum(x, 0, 32768, 0),
+      y: root.finiteNum(y, 0, 32768, 0),
+      flipX: false, flipY: false
+    }
+    w = root.finiteNum(w, 0, 32768, 0)
+    h = root.finiteNum(h, 0, 32768, 0)
+    var side = root.boundText(placement || "below", 16)
 
     if (side === "above") spec.flipY = true
     else if (side === "left") spec.flipX = true
@@ -359,7 +447,7 @@ Item {
   function openAtRoute(screenName, x, y, menuId) {
     root.openAt(screenName, x, y)
 
-    var route = MenuModel.resolveRoute(root.items, root.itemOrder, menuId)
+    var route = MenuModel.resolveRoute(root.items, root.itemOrder, root.boundText(menuId, 200))
     var chain = []
     var id = String(route || "")
     var guard = 0
@@ -389,6 +477,9 @@ Item {
   }
 
   function close() {
+    pointerProc.running = false
+    providerProc.running = false
+    root.providerQueue = []
     root.opened = false
     root.panes = []
     root.paneGeometry = []
@@ -679,7 +770,8 @@ Item {
       event.accepted = true
     } else if (event.text && event.text.length > 0 && event.text.charCodeAt(0) >= 0x20
                && !(event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))) {
-      root.filterText += event.text
+      if (root.filterText.length < root.maxFilterChars)
+        root.filterText += root.boundText(event.text, 8)
       event.accepted = true
     }
   }
@@ -692,7 +784,7 @@ Item {
     watchChanges: true
     printErrors: false
     onFileChanged: reload()
-    onLoaded: { root.defaultItems = MenuModel.parseMenuJsonc(text()); root.rebuild() }
+    onLoaded: { root.defaultItems = root.parseMenuText(text()); root.rebuild() }
     onLoadFailed: { root.defaultItems = []; root.rebuild() }
   }
 
@@ -702,7 +794,7 @@ Item {
     watchChanges: true
     printErrors: false
     onFileChanged: reload()
-    onLoaded: { root.userItems = MenuModel.parseMenuJsonc(text()); root.rebuild() }
+    onLoaded: { root.userItems = root.parseMenuText(text()); root.rebuild() }
     onLoadFailed: { root.userItems = []; root.rebuild() }
   }
 
@@ -728,7 +820,7 @@ Item {
       return
     }
     guardProc.collected = ""
-    guardProc.command = ["bash", "-lc", script]
+    guardProc.command = root.helperCommand(10, script)
     guardProc.running = true
   }
 
@@ -736,7 +828,10 @@ Item {
     id: guardProc
     property string collected: ""
     stdout: SplitParser {
-      onRead: function(data) { guardProc.collected += data + "\n" }
+      onRead: function(data) {
+        if (guardProc.collected.length > root.maxHelperBytes) { guardProc.running = false; return }
+        guardProc.collected += data + "\n"
+      }
     }
     onExited: function(exitCode, exitStatus) {
       // A killed batch only reported the rows it reached. Keep the last
@@ -832,7 +927,7 @@ Item {
     providerProc.menuId = menuId
     providerProc.providerKey = entry.provider
     providerProc.collected = ""
-    providerProc.command = ["bash", "-lc", spec.script]
+    providerProc.command = root.helperCommand(15, spec.script)
     providerProc.running = true
   }
 
@@ -856,16 +951,17 @@ Item {
     var spec = root.providerSpecs[providerKey]
     if (!spec) return
 
-    var lines = String(text || "").split("\n")
+    var lines = String(text || "").slice(0, root.maxHelperBytes).split("\n")
     var providerRows = []
     var takenIds = ({})
     for (var i = 0; i < lines.length; i++) {
+      if (providerRows.length >= root.maxProviderRows) break
       var line = lines[i].trim()
       if (!line) continue
       var parts = line.split("\t")
-      var label = parts[0] || ""
-      var value = parts[1] || parts[0] || ""
-      var current = parts[2] || ""
+      var label = root.boundText(parts[0] || "", root.maxFieldChars)
+      var value = root.boundText(parts[1] || parts[0] || "", root.maxFieldChars)
+      var current = root.boundText(parts[2] || "", root.maxFieldChars)
       if (!label) continue
       // Distinct values can slugify alike -- Fira Code and Fira-Code both give
       // fira-code -- and a repeated id is dropped, which would silently lose a
@@ -904,13 +1000,13 @@ Item {
   function mergeAppRows(menuId) {
     if (!root.appLibrary) return
 
-    var entries = root.appLibrary.sortedEntries("")
+    var entries = root.appLibrary.sortedEntries("").slice(0, root.maxAppRows)
     var appRows = []
     for (var i = 0; i < entries.length; i++) {
       var entry = entries[i].entry
-      var appId = String(entry.id || "")
+      var appId = root.boundText(entry.id || "", root.maxFieldChars)
       if (!appId) continue
-      var subtext = root.appLibrary.entrySubtext(entry)
+      var subtext = root.boundText(root.appLibrary.entrySubtext(entry), root.maxFieldChars)
       var aliases = subtext ? [subtext] : []
       try {
         if (entry.keywords && typeof entry.keywords.join === "function") aliases = aliases.concat(entry.keywords)
@@ -922,9 +1018,9 @@ Item {
         kind: "app",
         icon: "",
         iconFont: "",
-        appIcon: String(entry.icon || ""),
+        appIcon: root.boundText(entry.icon || "", root.maxFieldChars),
         appId: appId,
-        label: root.appLibrary.entryName(entry),
+        label: root.boundText(root.appLibrary.entryName(entry), root.maxFieldChars),
         title: "",
         target: "",
         description: subtext,
@@ -948,7 +1044,10 @@ Item {
     property string providerKey: ""
     property string collected: ""
     stdout: SplitParser {
-      onRead: function(data) { providerProc.collected += data + "\n" }
+      onRead: function(data) {
+        if (providerProc.collected.length > root.maxHelperBytes) { providerProc.running = false; return }
+        providerProc.collected += data + "\n"
+      }
     }
     onExited: function(exitCode, exitStatus) {
       if (exitCode === 0 && exitStatus === 0)
@@ -977,7 +1076,7 @@ Item {
   Process {
     id: pointerProc
     property string route: "root"
-    command: ["bash", "-lc", "hyprctl -j cursorpos; echo '@@'; hyprctl -j monitors"]
+    command: root.helperCommand(3, "hyprctl -j cursorpos; echo '@@'; hyprctl -j monitors")
     stdout: StdioCollector {
       onStreamFinished: root.openAtProbedPointer(text)
     }
@@ -985,12 +1084,12 @@ Item {
 
   function openAtPointer(route) {
     if (pointerProc.running) return
-    pointerProc.route = String(route || "root")
+    pointerProc.route = root.boundText(route || "root", 200)
     pointerProc.running = true
   }
 
   function openAtProbedPointer(text) {
-    var parts = String(text || "").split("@@")
+    var parts = String(text || "").slice(0, root.maxProbeBytes).split("@@")
     var cursor = null
     var monitors = []
     try { cursor = JSON.parse(parts[0]) } catch (e) { cursor = null }
@@ -1057,8 +1156,8 @@ Item {
   // toggle already knows whether the menu is showing.
   function open(payloadJson) {
     var payload = ({})
-    try { payload = JSON.parse(payloadJson || "{}") } catch (e) { payload = ({}) }
-    root.openAtPointer(payload.menu || payload.route || "root")
+    try { payload = JSON.parse(root.boundText(payloadJson || "{}", 4096)) } catch (e) { payload = ({}) }
+    root.openAtPointer(root.boundText(payload.menu || payload.route || "root", 200))
   }
 
   IpcHandler {
@@ -1083,7 +1182,7 @@ Item {
     // Scripted navigation, equivalent to the arrow keys and Enter. Useful
     // for demos and automated tests; goes through the same code paths.
     function nav(delta: int): void {
-      root.moveSelection(Number(delta) || 0)
+      root.moveSelection(root.finiteNum(delta, -100, 100, 0))
     }
 
     function enter(): void {
@@ -1138,8 +1237,8 @@ Item {
 
   function openWallpaperPicker() {
     if (wallpaperProc.running) return
-    wallpaperProc.command = ["bash", "-lc",
-      "background=$(omarchy-theme-bg-switcher); [[ -n $background ]] && omarchy-theme-bg-set \"$background\""]
+    wallpaperProc.command = root.helperCommand(600,
+      "background=$(omarchy-theme-bg-switcher); [[ -n $background ]] && omarchy-theme-bg-set \"$background\"")
     wallpaperProc.running = true
   }
 
@@ -1467,6 +1566,7 @@ Item {
               anchors.leftMargin: Style.spacing.sm
               verticalAlignment: Text.AlignVCenter
               text: "󰍉  " + pane.paneFilter
+              textFormat: Text.PlainText
               font.family: root.fontFamily
               font.pixelSize: Style.font.heading
               color: root.selectedText
@@ -1613,6 +1713,7 @@ Item {
                 width: root.iconColumn
                 horizontalAlignment: Text.AlignHCenter
                 text: row.entry ? row.entry.icon : ""
+                textFormat: Text.PlainText
                 font.family: (row.entry && row.entry.iconFont) ? row.entry.iconFont : root.fontFamily
                 font.pixelSize: Style.font.heading
                 color: row.active ? root.selectedText : root.foreground
@@ -1643,6 +1744,7 @@ Item {
                 width: Math.min(implicitWidth, row.width * 0.4)
                 visible: pane.filtering && text !== ""
                 text: pane.filtering && row.entry ? root.entryPathLabel(row.entry, pane.spec.menuId) : ""
+                textFormat: Text.PlainText
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
                 color: Qt.darker(root.foreground, 1.5)
@@ -1656,6 +1758,7 @@ Item {
                 anchors.rightMargin: Style.spacing.xs
                 anchors.verticalCenter: parent.verticalCenter
                 text: row.entry ? MenuModel.labelFor(row.entry, root.checkedResults) : ""
+                textFormat: Text.PlainText
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.heading
                 font.weight: row.entry && row.entry.kind === "hint" ? Font.Normal : Font.Medium
@@ -1759,6 +1862,7 @@ Item {
             width: root.iconColumn
             horizontalAlignment: Text.AlignHCenter
             text: gEntry ? gEntry.icon : ""
+            textFormat: Text.PlainText
             font.family: (gEntry && gEntry.iconFont) ? gEntry.iconFont : root.fontFamily
             font.pixelSize: Style.font.heading
             color: ghost.dimmed ? Color.muted : root.foreground
@@ -1784,6 +1888,7 @@ Item {
             anchors.rightMargin: Style.spacing.xs
             anchors.verticalCenter: parent.verticalCenter
             text: gEntry ? MenuModel.labelFor(gEntry, root.checkedResults) : ""
+            textFormat: Text.PlainText
             font.family: root.fontFamily
             font.pixelSize: Style.font.heading
             color: ghost.dimmed ? Color.muted : root.foreground
