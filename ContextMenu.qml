@@ -1,27 +1,24 @@
-// Omarchy context menus.
+// Glide menus — the Omarchy menu tree as a keyboard-first cascading menu
+// with caelestia-style motion. A fork of Cantina's omarchy-context-menus;
+// the menu model is still a verbatim copy of Omarchy's own MenuModel.js
+// reading omarchy-menu.jsonc plus the user extension, so entries, `when:`
+// guards and ✓ marks can never drift from the built-in menu.
 //
-// The whole Omarchy menu tree, drawn as a cascading context menu instead of a
-// centred search card. It reads the very same sources the built-in menu does --
-// Omarchy's default omarchy-menu.jsonc plus the user extension at
-// ~/.config/omarchy/extensions/omarchy-menu.jsonc -- through a verbatim copy of
-// Omarchy's own MenuModel.js, so the two can never drift apart: an entry added
-// to the extension file shows up in both, with the same `when:` guards and the
-// same ✓ marks.
+// The interaction model, in the default centered layout:
 //
-// What differs is the interaction. This opens under the pointer, submenus
-// cascade sideways as you hover, and the whole chain stays on screen so you can
-// see the path you took. Three ways in:
+//   * the pane being used always sits mid-screen; ancestors slide one slot
+//     left per level, and depth changes animate as one sliding chain
+//   * a translucent ghost previews the selected row's submenu on the right
+//     — exactly where the real pane materializes on Right/Enter
+//   * a selection pill glides between rows, stretching mid-travel
+//   * typing searches the whole subtree under the pane (apps included, with
+//     breadcrumbs); provider submenus shortlist their top entries otherwise
+//   * walking back restores the parked filter and selection of the parent,
+//     and the closed pane slides off right instead of vanishing
 //
-//   * right-click the desktop (a transparent catcher on the Bottom layer, so it
-//     sits above the wallpaper and below every window)
-//   * the bar button in BarWidget.qml, which cascades down from itself
-//   * a keybinding, which opens at the pointer on the Overlay layer -- above
-//     whatever window happens to be focused
-//
-// Provider-backed submenus (Apps, Font, Power profile) are filled in from the
-// same sources the built-in menu uses, so nothing has to hand off to it. Long
-// lists are typed at rather than scrolled: any printable key filters the pane
-// you are standing in.
+// Three ways in: right-click the desktop (catcher on the Bottom layer), the
+// bar button, or a keybinding/IPC summon (omarchy-shell glideMenu toggle).
+// The `layoutStyle` setting restores the original anchored cascade.
 
 import Quickshell
 import Quickshell.Io
@@ -370,7 +367,7 @@ Item {
     var px = next[0].x
     var py = next[0].y
     for (var i = 0; i < chain.length; i++) {
-      var parentRows = root.rowsFor(next[i].menuId)
+      var parentRows = root.displayRows(next[i].menuId)
       var rowIndex = -1
       for (var r = 0; r < parentRows.length; r++) {
         if (parentRows[r].id === chain[i]) { rowIndex = r; break }
@@ -419,6 +416,17 @@ Item {
   // pointer landing back on its parent row does not hover-reopen it: the
   // child pane had the hover until it died, and the parent row regaining it
   // restarts the dwell. Click, Enter, and Right still reopen immediately.
+  // Snapshot of the pane a walk-back just closed, so it can slide right and
+  // fade instead of vanishing: the Repeater destroys the real delegate the
+  // moment the model shrinks.
+  property var exitSnapshot: null
+  Timer {
+    id: exitClear
+    interval: 360
+    repeat: false
+    onTriggered: root.exitSnapshot = null
+  }
+
   property string recentlyClosedMenu: ""
   Timer {
     id: reopenGuard
@@ -432,6 +440,14 @@ Item {
     if (root.panes[depth] && root.panes[depth].menuId) {
       root.recentlyClosedMenu = String(root.panes[depth].menuId)
       reopenGuard.restart()
+      if (root.centeredLayout && root.animations && root.opened) {
+        var closingGeo = root.geometryFor(depth)
+        var snap = { menuId: String(root.panes[depth].menuId), y: closingGeo.y }
+        // Null first so the Loader reloads and the slide restarts even when
+        // a previous exit is still mid-flight.
+        root.exitSnapshot = null
+        Qt.callLater(function() { root.exitSnapshot = snap; exitClear.restart() })
+      }
     }
     var next = root.panes.slice(0, depth)
     // The pane that becomes deepest takes its parked filter back as the live
@@ -561,8 +577,13 @@ Item {
     if (rows.length === 0) return
     var next = root.selectedIndex + delta
     if (root.selectedIndex < 0) next = delta > 0 ? 0 : rows.length - 1
-    if (next < 0) next = rows.length - 1
-    if (next >= rows.length) next = 0
+    // Walk over inert hint rows; guard against an all-hint pane.
+    for (var hops = 0; hops < rows.length; hops++) {
+      if (next < 0) next = rows.length - 1
+      if (next >= rows.length) next = 0
+      if (!rows[next] || rows[next].kind !== "hint") break
+      next += delta > 0 ? 1 : -1
+    }
     root.selectedIndex = next
   }
 
@@ -1163,6 +1184,31 @@ Item {
         sourceComponent: GhostPane { panelItem: panel }
       }
 
+      // A pane closed by walking back slides one slot right and fades out
+      // here instead of blinking out of existence.
+      Loader {
+        active: root.centeredLayout && root.animations && root.exitSnapshot !== null
+        sourceComponent: GhostPane {
+          panelItem: panel
+          menuId: root.exitSnapshot ? root.exitSnapshot.menuId : ""
+          z: -1
+
+          property bool gone: false
+          Component.onCompleted: gone = true
+
+          x: (panel.width - width) / 2 + (gone ? root.paneWidth + Style.space(12) : 0)
+          y: root.exitSnapshot ? root.exitSnapshot.y : Style.gapsOut
+          opacity: gone ? 0 : 1
+
+          Behavior on x {
+            NumberAnimation { duration: 300; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.38, 1.21, 0.22, 1.0, 1, 1] }
+          }
+          Behavior on opacity {
+            NumberAnimation { duration: 260; easing.type: Easing.BezierSpline; easing.bezierCurve: [0, 0, 0, 1, 1, 1] }
+          }
+        }
+      }
+
       Repeater {
         model: root.panes.length
 
@@ -1567,8 +1613,11 @@ Item {
   component GhostPane: BorderSurface {
     id: ghost
     required property var panelItem
+    // Which submenu to render; instances may override position and opacity
+    // (the exit snapshot reuses this component to slide a closed pane away).
+    property string menuId: root.ghostMenuId
 
-    readonly property var ghostRows: root.ghostMenuId ? root.displayRows(root.ghostMenuId) : []
+    readonly property var ghostRows: ghost.menuId ? root.displayRows(ghost.menuId) : []
 
     width: root.paneWidth
     height: Math.min(

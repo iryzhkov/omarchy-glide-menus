@@ -1,181 +1,85 @@
-# Omarchy Context Menus
+# Glide menus
 
-The whole Omarchy menu, as a cascading context menu.
+The whole Omarchy menu as a keyboard-first cascading menu with
+caelestia-style motion. A fork of
+[Cantina's context menus](https://github.com/cantinalabs/omarchy-context-menus)
+that keeps its menu model — a verbatim copy of Omarchy's own `MenuModel.js`
+reading `omarchy-menu.jsonc` plus your user extension, so entries, `when:`
+guards and ✓ marks never drift from the built-in menu — and reworks the
+interaction around a centered, animated cascade.
 
-![Omarchy Context Menus](preview.png)
+## What it does
 
-Same tree, same entries, same `when:` guards and `✓` marks as the menu on
-`SUPER + SPACE` — it reads the very same files. What changes is the
-interaction: it opens under the pointer, submenus cascade sideways as you
-hover, and the chain stays on screen so you can see the path you took.
-
-Three ways in, all the same menu:
-
-- **right-click the desktop** — where a context menu belongs
-- **the bar button** — drops out of the Omarchy logo, in place of the built-in menu
-- **a keybinding** — opens at the pointer, on top of whatever window has focus
-
-Nothing hands off to the built-in menu, so you can stop using it. Applications
-are listed inline with their icons, and any pane you are standing in can be
-narrowed by typing at it.
+- **Centered cascade.** The pane you are using always sits mid-screen, so
+  your eyes never travel. Descending slides the whole chain one slot left
+  as a single animated motion; ancestors stay visible as the path you took,
+  the oldest walking off the edge. Walking back slides everything right
+  again, and the closed pane glides away instead of vanishing.
+- **Ghost preview.** When the selection rests on a submenu row, an opaque,
+  muted preview of that submenu appears to the right — exactly where the
+  real pane materializes when you press Right or Enter, chevrons, app
+  icons and all.
+- **Gliding selection.** The highlight is a pill that slides between rows,
+  its leading edge faster than its trailing edge, the same motion family as
+  [glide-workspaces](https://github.com/iryzhkov/omarchy-glide-workspaces).
+- **Search everything.** Typing searches the entire subtree under the pane
+  — apps inside Apps, submenus by name, actions in any branch — with muted
+  breadcrumbs (`Style › Theme`) on results from deeper branches. Provider
+  submenus (Apps, fonts) preload on the first keystroke.
+- **Shortlists, not scrolling.** Provider-filled submenus show their top
+  entries in the provider's own ranking (12 by default) with a
+  "type to search N more" hint row, instead of hundreds of rows.
+- **Navigation memory.** Descending parks the pane's filter and selection;
+  walking back restores both — you land on the row you left, with the
+  search you had typed.
+- Escape closes the whole cascade; Left, Backspace (on an empty filter),
+  and right-click walk back one pane. Hover selection is off by default
+  and available as a setting.
 
 ## Install
 
-```bash
-omarchy plugin add https://github.com/cantinalabs/omarchy-context-menus.git --enable
+```
+omarchy plugin add https://github.com/iryzhkov/omarchy-glide-menus.git --enable
 ```
 
-Enabling **takes the built-in menu's place**, rather than sitting next to it.
-The bar button lands in the exact slot `omarchy.menu` occupied — keeping that
-entry's own settings — and the built-in menu is switched off, so there is only
-ever one Omarchy glyph in your bar. Disabling puts it back where it was:
-
-```bash
-omarchy plugin disable cantina.omarchy-context-menus
-```
-
-Because it stands in for `omarchy.menu`, everything that already summoned the
-built-in menu now opens this one. Your existing keybinding works untouched, as
-does `omarchy-menu toggle system`, the screen-recording indicator, and anything
-else routed through that id — including `omarchy-menu refresh` and
-`omarchy-menu ping`.
-
-The desktop right-click starts working immediately. No fork or clone of the
-background plugin is involved, so whichever wallpaper renderer you run is left
-alone.
-
-## The keybinding
-
-Whatever key already opened the Omarchy menu opens this one — `SUPER + SPACE`
-on a stock install — with no change to your Hyprland config. It opens at the
-pointer, above any window, a fullscreen one included, and closes on a second
-press.
-
-To bind another key, in `~/.config/hypr/bindings.lua`:
+Enabling replaces the built-in menu (`clonedFrom: omarchy.menu`); disabling
+restores it. Summon with the bar button, a desktop right-click, or bind a
+key:
 
 ```lua
-o.bind("SUPER + R", "Context menu", "omarchy-shell shell toggle cantina.omarchy-context-menus")
+hl.unbind("SUPER + SPACE")
+o.bind("SUPER + SPACE", "Menu", "omarchy-shell glideMenu toggle")
 ```
-
-To land somewhere deeper in the tree, pass a route:
-
-```lua
-o.bind("SUPER + SHIFT + T", "Themes", "omarchy-shell contextMenu openRoute style.theme")
-```
-
-A route is any menu id or alias from `omarchy-menu.jsonc` — `style`, `setup`,
-`apps`, `system`, `style.theme` — and the parents stay open behind it, so you
-can still browse out of where you landed.
-
-## Keys, once it is open
-
-| | |
-|---|---|
-| `↑` `↓` | move within the pane |
-| `→` `Enter` | open the submenu, or run the entry |
-| `←` `Escape` | back one level, then close |
-| type anything | narrow the pane you are standing in |
-| `Backspace` | undo a character, then back one level |
-| right-click | back one level, from anywhere in the menu |
-
-Typing is what makes the Apps submenu work like the launcher it replaces:
-open it, type `obs`, press `Enter`.
 
 ## Settings
 
-The plugin reads its own entry in `~/.config/omarchy/shell.json` — the one in
-`bar.layout.*` when the bar button is in use, otherwise the one in `plugins[]`.
-Every key is optional. With the bar button installed they are also a form under
-the bar's widget settings.
+Edit in the bar's widget settings, or `omarchy bar set omarchy.menu <key>
+<value>` while the plugin stands in for the built-in menu button.
 
-| key | default | |
-|---|---|---|
-| `desktopRightClick` | `true` | Right-click on bare desktop opens the menu |
-| `wallpaperDoubleClick` | `true` | Double-click on bare desktop still opens the wallpaper picker |
-| `inlineApps` | `true` | List applications in the menu; off sends Apps to the built-in menu |
-| `submenuDelay` | `140` | Milliseconds of hover before a submenu opens |
-| `paneWidth` | `268` | Pane width, in the shell's spacing units |
-| `rightClickCommand` | `xdg-terminal-exec` | What right-clicking the bar button runs |
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `layoutStyle` | `centered` | `centered` keeps the active pane mid-screen; `anchored` is the original grow-from-the-summon-point cascade. |
+| `animations` | `true` | Slides, glides, and ghosts. Off restores instant behavior. |
+| `hoverSelects` | `false` | Pointer hover moves the selection and opens submenus after a dwell. |
+| `escClosesAll` | `true` | Escape dismisses the whole cascade instead of walking back one pane. |
+| `appsShown` | `12` | Shortlist length for provider submenus; `0` shows everything and scrolls. |
+| `summonPlacement` | `center` | Anchored layout only: keybinding summons open mid-screen or under the pointer. |
+| `paneWidth` | `300` | Pane width in shell spacing units. |
+| `submenuDelay` | `140` | Hover dwell before a submenu opens (with `hoverSelects`). |
+| `desktopRightClick` | `true` | Right-click on bare desktop opens the menu at the click. |
+| `wallpaperDoubleClick` | `true` | Double-click on the desktop still opens the wallpaper picker. |
+| `inlineApps` | `true` | Fill the Apps submenu from the launcher's app library. |
+| `rightClickCommand` | `xdg-terminal-exec` | What a right-click on the bar button runs. |
 
-```json
-{
-  "bar": {
-    "layout": {
-      "left": [
-        { "id": "cantina.omarchy-context-menus", "submenuDelay": 60 }
-      ]
-    }
-  }
-}
-```
-## Uninstall/Remove
-
-To safely uninstall/remove this plugin, run the following command
-
-```omarchy plugin remove cantina.omarchy-context-menus```
-
-
-## How it fits together
-
-The menu is not a copy of Omarchy's. It parses Omarchy's own
-`default/omarchy/omarchy-menu.jsonc` and your
-`~/.config/omarchy/extensions/omarchy-menu.jsonc` through a verbatim copy of
-Omarchy's `MenuModel.js`, and both files are watched, so an entry you add to
-the extension shows up here and in the built-in menu at the same moment,
-without a restart. `when:` and `checked:` expressions are evaluated the same
-way too — one batched bash process per open, not a fork per row.
-
-Submenus whose contents only exist at runtime are filled in the same way the
-built-in menu fills them: **Apps** from the shell's shared application library
-(so icons, launch feedback and hidden-entry rules all match the launcher),
-**Font** and **Power profile** from the same enumerations, with the current
-value carrying a `✓`. Should Omarchy add a provider this plugin has not learned
-yet, that one submenu — and only that one — opens the built-in menu at its
-route rather than showing you an empty pane.
-
-The desktop right-click is a transparent, screen-filling surface on the
-**Bottom** layer: above the wallpaper, below every window and below the bar. It
-never covers anything you can see, and it is the reason no fork of the
-background plugin is needed. It does intercept the clicks that plugin would
-otherwise get, so the gesture it owns is passed straight back: double-click
-still opens the wallpaper picker. Its double-*right*-click theme switcher is
-not, because a single right-click now opens this menu — **Style > Theme** is
-two rows away.
-
-This plugin rewrites `$HOME/.config/omarchy/shell.json` in two ways...
+## Remove
 
 ```
-- replaces the omarchy.menu entry in bar.layout.left with this plugin's id
-- appends omarchy.menu to disabledPlugins[]
-```
-Both of these changes are undone by `omarchy plugin disable` or `omarchy plugin remove`
-
-## IPC
-
-Everything the bar button and the catcher do is available on the
-`contextMenu` target:
-
-```bash
-omarchy-shell contextMenu open                          # at the pointer
-omarchy-shell contextMenu openRoute style.theme         # at the pointer, branch expanded
-omarchy-shell contextMenu toggle
-omarchy-shell contextMenu close
-omarchy-shell contextMenu openAt HDMI-A-1 800 400       # explicit screen and position
-omarchy-shell contextMenu openAtRoute HDMI-A-1 800 400 apps
-omarchy-shell contextMenu openAtAnchor HDMI-A-1 168 0 24 29 below
+omarchy plugin remove io.github.iryzhkov.glide-menus
 ```
 
-`openAtAnchor` takes a rectangle and a side (`below`, `above`, `left`,
-`right`) rather than a point, which is how the bar button cascades out of
-itself whichever edge your bar is pinned to.
+## Notes
 
-## Requirements
-
-Omarchy 4 (the Quickshell-based `omarchy-shell`) on Hyprland. The
-keybinding entry points ask Hyprland where the pointer is; everything else is
-in-process.
-
-## Licence
-
-MIT — see [LICENSE](LICENSE). `MenuModel.js` is Omarchy's own, vendored
-verbatim and used under its licence.
+- No external dependencies, services, or privileged steps: pure QML on the
+  APIs the Omarchy shell ships. Menu content, guard evaluation, and
+  provider scripts are the built-in menu's own.
+- MIT licensed; the original context-menus code is © Cantina, also MIT.
