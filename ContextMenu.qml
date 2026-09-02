@@ -1189,15 +1189,23 @@ Item {
           x: root.centeredLayout
             ? centeredX
             : Math.max(Style.gapsOut, overflowsRight ? alternateX : baseX)
-          // Root pane: centered on its natural height. Child panes: top
-          // aligned with the row they were opened from (spec.y carries the
-          // anchor row's level), sliding up only as far as needed to fit —
-          // so a child always vertically intersects its parent instead of
-          // floating at its own center.
+          // Root pane: centered on its natural height. Child panes anchor to
+          // the row they were opened from (spec.y carries its level): top
+          // aligned and growing downward when there is room below, flipped
+          // to bottom-aligned — extending upward from the row — when the
+          // space is above instead. Either way the child intersects its
+          // parent at the anchor row rather than floating at its own center.
+          readonly property real anchoredChildY: {
+            var rowTop = anchorY
+            if (naturalHeight <= panel.height - Style.gapsOut - rowTop) return rowTop
+            var flippedTop = rowTop + root.rowHeight + root.panePadding - naturalHeight
+            if (flippedTop >= Style.gapsOut) return flippedTop
+            return Math.max(Style.gapsOut, Math.min(rowTop, panel.height - Style.gapsOut - naturalHeight))
+          }
           y: root.centeredLayout
             ? (index === 0
                 ? Math.max(Style.gapsOut, (panel.height - naturalHeight) / 2)
-                : Math.max(Style.gapsOut, Math.min(anchorY, panel.height - Style.gapsOut - naturalHeight)))
+                : anchoredChildY)
             : Math.max(Style.gapsOut, Math.min(baseY, panel.height - height - Style.gapsOut))
 
           // Geometry settles for a beat before the slide Behaviors arm: a
@@ -1542,7 +1550,19 @@ Item {
       Math.max(ghostRows.length, 1) * root.rowHeight + root.panePadding * 2,
       panelItem.height - Style.gapsOut * 2)
     x: (panelItem.width - width) / 2 + (root.paneWidth + Style.space(12))
-    y: Math.max(Style.gapsOut, (panelItem.height - height) / 2)
+
+    // Sit exactly where the real child pane would open: top-aligned with
+    // the selected row, flipped to extend upward when the space is above
+    // (mirrors the pane delegate's anchoredChildY logic).
+    readonly property real anchorRowY:
+      root.geometryFor(root.panes.length - 1).y + root.selectedRowY(root.panes.length - 1)
+    y: {
+      if (naturalBelow) return anchorRowY
+      var flippedTop = anchorRowY + root.rowHeight + root.panePadding - height
+      if (flippedTop >= Style.gapsOut) return flippedTop
+      return Math.max(Style.gapsOut, Math.min(anchorRowY, panelItem.height - Style.gapsOut - height))
+    }
+    readonly property bool naturalBelow: height <= panelItem.height - Style.gapsOut - anchorRowY
 
     radius: root.cornerRadius
     color: root.background
