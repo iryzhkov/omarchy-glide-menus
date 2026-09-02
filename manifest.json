@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "id": "cantina.omarchy-context-menus",
-  "name": "Context menus",
+  "id": "io.github.iryzhkov.glide-menus",
+  "name": "Glide menus",
   "version": "1.0.0",
-  "author": "Cantina",
+  "author": "Igor Ryzhkov",
   "license": "MIT",
-  "description": "The whole Omarchy menu as a cascading context menu: right-click the desktop, click the bar button, or press a key over any window",
+  "description": "Cantina's cascading context menus with caelestia-style motion: panes grow out of their anchor and the selection highlight glides between rows. Right-click the desktop, click the bar button, or press a key over any window.",
   "kinds": [
     "menu",
     "bar-widget"
@@ -19,8 +19,8 @@
     "clonedFrom": "omarchy.menu"
   },
   "barWidget": {
-    "displayName": "Context menu",
-    "description": "Cascades the Omarchy menu out of the bar button, and onto the desktop's right-click",
+    "displayName": "Glide menu",
+    "description": "Cascading Omarchy menu with expressive motion, on the bar button and the desktop right-click",
     "category": "Compositor",
     "allowMultiple": false,
     "defaultSection": "left",
@@ -30,9 +30,17 @@
       "inlineApps": true,
       "submenuDelay": 140,
       "paneWidth": 268,
-      "rightClickCommand": "xdg-terminal-exec"
+      "rightClickCommand": "xdg-terminal-exec",
+      "animations": true
     },
     "schema": [
+      {
+        "key": "animations",
+        "type": "boolean",
+        "label": "Animations",
+        "defaultValue": true,
+        "description": "Pane entrances grow out of their anchor and the selection highlight glides between rows with a caelestia-style stretch. Off restores the instant behavior of the original context menus."
+      },
       {
         "key": "desktopRightClick",
         "type": "boolean",

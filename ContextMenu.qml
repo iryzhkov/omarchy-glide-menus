@@ -40,7 +40,7 @@ Item {
   property var manifest: null
   property var pluginRegistry: null
 
-  readonly property string pluginId: (manifest && manifest.id) ? String(manifest.id) : "cantina.omarchy-context-menus"
+  readonly property string pluginId: (manifest && manifest.id) ? String(manifest.id) : "io.github.iryzhkov.glide-menus"
   readonly property var appLibrary: root.shell ? root.shell.appLibrary : null
 
   readonly property string defaultMenuPath: root.omarchyPath + "/default/omarchy/omarchy-menu.jsonc"
@@ -53,7 +53,7 @@ Item {
   // layout when the bar button is in use, and in `plugins[]` otherwise.
   //
   //   "bar": { "layout": { "left": [
-  //     { "id": "cantina.omarchy-context-menus", "desktopRightClick": false }
+  //     { "id": "io.github.iryzhkov.glide-menus", "desktopRightClick": false }
   //   ] } }
   //
   // Either is read, layout entry first, because that is the one the bar's own
@@ -87,6 +87,7 @@ Item {
     return (value === undefined || value === null) ? fallback : value
   }
 
+  readonly property bool animations: root.setting("animations", true) !== false
   readonly property bool desktopRightClick: root.setting("desktopRightClick", true) !== false
   readonly property bool wallpaperDoubleClick: root.setting("wallpaperDoubleClick", true) !== false
   readonly property bool inlineApps: root.setting("inlineApps", true) !== false
@@ -183,9 +184,12 @@ Item {
     if (!spec) return []
 
     var rows = root.rowsFor(spec.menuId)
-    if (depth !== root.panes.length - 1 || !root.filterText) return rows
+    // The deepest pane filters by the live type-ahead; parents keep showing
+    // the filter that was parked on them when their submenu opened.
+    var filter = depth === root.panes.length - 1 ? root.filterText : String(spec.filter || "")
+    if (!filter) return rows
 
-    var terms = root.filterText.toLowerCase().trim().split(/\s+/)
+    var terms = filter.toLowerCase().trim().split(/\s+/)
     var out = []
     for (var i = 0; i < rows.length; i++) {
       var haystack = MenuModel.nameSearchText(rows[i])
@@ -312,10 +316,20 @@ Item {
   // different row, so stale submenus close instead of piling up.
   function truncate(depth) {
     if (root.panes.length <= depth) return
-    root.panes = root.panes.slice(0, depth)
+    var next = root.panes.slice(0, depth)
+    // The pane that becomes deepest takes its parked filter back as the live
+    // type-ahead, so walking back up the cascade restores the same filtered
+    // view that was left behind.
+    var restored = ""
+    if (depth > 0 && next[depth - 1] && next[depth - 1].filter) {
+      restored = String(next[depth - 1].filter)
+      next[depth - 1] = Object.assign({}, next[depth - 1])
+      delete next[depth - 1].filter
+    }
+    root.panes = next
     root.paneGeometry = root.paneGeometry.slice(0, depth)
-    root.filterText = ""
-    root.selectedIndex = -1
+    root.filterText = restored
+    root.selectedIndex = restored ? 0 : -1
   }
 
   function openChild(depth, entry, paneX, paneY, rowY) {
@@ -329,8 +343,12 @@ Item {
     // pane, and losing its scroll position, on every hover event).
     if (root.panes.length > depth + 1 && root.panes[depth + 1].menuId === target) return false
 
-    root.filterText = ""
     var next = root.panes.slice(0, depth + 1)
+    // Park the live type-ahead on this pane before descending, so the
+    // filtered view survives a walk back up (see truncate).
+    if (root.filterText)
+      next[depth] = Object.assign({}, next[depth], { filter: root.filterText })
+    root.filterText = ""
     next.push({
       menuId: target,
       // Overlap by the border so the cascade reads as one connected surface
@@ -837,7 +855,7 @@ Item {
   }
 
   // Plugin lifecycle. The host calls these for
-  //   omarchy-shell shell toggle cantina.omarchy-context-menus '{"menu":"root"}'
+  //   omarchy-shell shell toggle io.github.iryzhkov.glide-menus '{"menu":"root"}'
   // which is the shape a keybinding wants: no coordinates to work out, and
   // toggle already knows whether the menu is showing.
   function open(payloadJson) {
@@ -847,7 +865,7 @@ Item {
   }
 
   IpcHandler {
-    target: "contextMenu"
+    target: "glideMenu"
 
     // Open at the pointer, above whatever window is focused.
     function open(): void {
@@ -855,7 +873,7 @@ Item {
     }
 
     // Open at the pointer with a branch pre-expanded, e.g.
-    //   omarchy-shell contextMenu openRoute style
+    //   omarchy-shell glideMenu openRoute style
     function openRoute(menuId: string): void {
       root.openAtPointer(menuId)
     }
@@ -1004,7 +1022,8 @@ Item {
           readonly property var spec: root.panes[index] || ({ x: 0, y: 0 })
           readonly property var rows: root.visibleRows(index)
           readonly property bool deepest: index === root.panes.length - 1
-          readonly property bool filtering: deepest && root.filterText.length > 0
+          readonly property string paneFilter: deepest ? root.filterText : String(spec.filter || "")
+          readonly property bool filtering: paneFilter.length > 0
           readonly property int headerHeight: filtering ? root.rowHeight : 0
 
           // Flip left of the anchor rather than run off the right edge, and
@@ -1033,9 +1052,42 @@ Item {
           clip: true
           z: index
 
+          // Caelestia-style entrance: the pane grows out of the corner it was
+          // anchored at, with an expressive overshoot, instead of popping in.
+          readonly property bool flippedXEffective: spec.flipX === true || overflowsRight
+          property bool entered: false
+          transformOrigin: spec.flipY === true
+            ? (flippedXEffective ? Item.BottomRight : Item.BottomLeft)
+            : (flippedXEffective ? Item.TopRight : Item.TopLeft)
+          scale: !root.animations || entered ? 1 : 0.85
+          opacity: !root.animations || entered ? 1 : 0
+          Behavior on scale {
+            enabled: root.animations
+            NumberAnimation { duration: 320; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.38, 1.21, 0.22, 1.0, 1, 1] }
+          }
+          Behavior on opacity {
+            enabled: root.animations
+            NumberAnimation { duration: 160; easing.type: Easing.BezierSpline; easing.bezierCurve: [0, 0, 0, 1, 1, 1] }
+          }
+
+          // Which row this pane's glide highlight should sit on: the row whose
+          // submenu is open for parent panes, the live selection for the
+          // deepest pane.
+          readonly property int glideRow: {
+            if (!deepest) {
+              for (var i = 0; i < rows.length; i++)
+                if (root.submenuOpenFor(index, rows[i])) return i
+              return -1
+            }
+            return root.selectedIndex
+          }
+
           onXChanged: root.notePaneGeometry(index, x, y, list.contentY)
           onYChanged: root.notePaneGeometry(index, x, y, list.contentY)
-          Component.onCompleted: root.notePaneGeometry(index, x, y, list.contentY)
+          Component.onCompleted: {
+            root.notePaneGeometry(index, x, y, list.contentY)
+            pane.entered = true
+          }
 
           // Swallow clicks so they don't reach the click-away layer, and make
           // right-click anywhere in a pane walk back one level.
@@ -1060,7 +1112,7 @@ Item {
               anchors.fill: parent
               anchors.leftMargin: Style.spacing.sm
               verticalAlignment: Text.AlignVCenter
-              text: "󰍉  " + root.filterText
+              text: "󰍉  " + pane.paneFilter
               font.family: root.fontFamily
               font.pixelSize: Style.font.body
               color: root.selectedText
@@ -1097,6 +1149,37 @@ Item {
                 if (root.selectedIndex >= 0 && root.selectedIndex < pane.rows.length)
                   list.positionViewAtIndex(root.selectedIndex, ListView.Contain)
               }
+            }
+
+            // The selection highlight, one per pane: an accent surface that
+            // glides between rows, its leading edge faster than its trailing
+            // edge so it stretches mid-travel (same motion as glide-workspaces).
+            Rectangle {
+              id: glidePill
+              parent: list.contentItem
+              z: -1
+              visible: root.animations && pane.glideRow >= 0
+
+              readonly property real target: pane.glideRow >= 0 ? pane.glideRow * root.rowHeight : 0
+              property real leadY: target
+              property real trailY: target
+              onTargetChanged: { leadY = target; trailY = target }
+
+              Behavior on leadY {
+                enabled: glidePill.visible
+                NumberAnimation { duration: 240; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.38, 1.21, 0.22, 1.0, 1, 1] }
+              }
+              Behavior on trailY {
+                enabled: glidePill.visible
+                NumberAnimation { duration: 380; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.05, 0, 0.133, 0.06, 0.167, 0.4, 0.208, 0.82, 0.25, 1, 1, 1] }
+              }
+
+              x: Style.space(2)
+              width: list.width - Style.space(4)
+              y: Math.min(leadY, trailY)
+              height: Math.abs(leadY - trailY) + root.rowHeight
+              radius: Math.max(0, root.cornerRadius - Style.space(2))
+              color: root.selectedBackground
             }
 
             delegate: Item {
@@ -1150,7 +1233,9 @@ Item {
                 anchors.leftMargin: Style.space(2)
                 anchors.rightMargin: Style.space(2)
                 radius: Math.max(0, root.cornerRadius - Style.space(2))
-                color: row.active ? root.selectedBackground : "transparent"
+                // With animations on, the gliding pill below the delegates is
+                // the highlight; this static one is the fallback.
+                color: row.active && !root.animations ? root.selectedBackground : "transparent"
               }
 
               Text {

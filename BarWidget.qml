@@ -15,7 +15,7 @@ import qs.Ui
 
 BarWidget {
   id: root
-  moduleName: "cantina.omarchy-context-menus"
+  moduleName: "io.github.iryzhkov.glide-menus"
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -62,7 +62,7 @@ BarWidget {
     var screenName = (window && window.screen) ? String(window.screen.name) : ""
     var point = root.screenPoint()
 
-    root.bar.run("omarchy-shell -q contextMenu toggleAtAnchor "
+    root.bar.run("omarchy-shell -q glideMenu toggleAtAnchor "
       + Util.shellQuote(screenName) + " "
       + Math.round(point.x) + " " + Math.round(point.y) + " "
       + Math.round(button.width) + " " + Math.round(button.height) + " "
