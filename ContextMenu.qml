@@ -1205,7 +1205,7 @@ Item {
           // type-ahead input — stays put while a search changes the row
           // count, and the pane only grows or shrinks downward.
           readonly property real naturalHeight: Math.min(
-            Math.max(root.rowsFor(spec.menuId).length, 1) * root.rowHeight + root.panePadding * 2,
+            Math.max(root.displayRows(spec.menuId).length, 1) * root.rowHeight + root.panePadding * 2,
             panel.height - Style.gapsOut * 2)
 
           x: root.centeredLayout
@@ -1579,8 +1579,10 @@ Item {
     // Sit exactly where the real child pane would open: top-aligned with
     // the selected row, flipped to extend upward when the space is above
     // (mirrors the pane delegate's anchoredChildY logic).
+    // Matches the spec.y a real openChild would compute (row level minus
+    // the pane padding), so ghost and materialized pane land identically.
     readonly property real anchorRowY:
-      root.geometryFor(root.panes.length - 1).y + root.selectedRowY(root.panes.length - 1)
+      root.geometryFor(root.panes.length - 1).y + root.selectedRowY(root.panes.length - 1) - root.panePadding
     y: {
       if (naturalBelow) return anchorRowY
       var flippedTop = anchorRowY + root.rowHeight + root.panePadding - height
