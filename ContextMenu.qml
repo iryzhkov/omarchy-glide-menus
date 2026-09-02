@@ -94,7 +94,7 @@ Item {
   // summon point.
   readonly property bool centeredLayout: String(root.setting("layoutStyle", "centered")) !== "anchored"
   readonly property bool escClosesAll: root.setting("escClosesAll", true) !== false
-  readonly property bool hoverSelects: root.setting("hoverSelects", true) !== false
+  readonly property bool hoverSelects: root.setting("hoverSelects", false) === true
   readonly property bool desktopRightClick: root.setting("desktopRightClick", true) !== false
   readonly property bool wallpaperDoubleClick: root.setting("wallpaperDoubleClick", true) !== false
   readonly property bool inlineApps: root.setting("inlineApps", true) !== false
@@ -333,7 +333,11 @@ Item {
     if (!entry || !isSubmenu(entry)) return ""
     return targetOf(entry)
   }
-  onGhostMenuIdChanged: if (ghostMenuId) loadProvider(ghostMenuId)
+  // Deferred: loading a provider mutates the menu model that the
+  // ghostMenuId binding itself reads, so doing it inline is a binding loop.
+  onGhostMenuIdChanged: if (ghostMenuId) Qt.callLater(function() {
+    if (root.ghostMenuId) root.loadProvider(root.ghostMenuId)
+  })
 
   // The submenu that was just closed by walking back, kept briefly so the
   // pointer landing back on its parent row does not hover-reopen it: the
@@ -369,9 +373,12 @@ Item {
         delete next[depth - 1].sel
       }
     }
+    // Filter first, panes second: both invalidate the surviving pane's rows
+    // and height, and doing it in this order keeps the animated properties
+    // retargeting toward the final geometry instead of a stale intermediate.
+    root.filterText = restored
     root.panes = next
     root.paneGeometry = root.paneGeometry.slice(0, depth)
-    root.filterText = restored
     // Land back on the row the submenu was opened from, not at the top.
     root.selectedIndex = restoredSel
   }
@@ -1124,12 +1131,27 @@ Item {
             ? Math.max(Style.gapsOut, (panel.height - height) / 2)
             : Math.max(Style.gapsOut, Math.min(baseY, panel.height - height - Style.gapsOut))
 
+          // Geometry settles for a beat before the slide Behaviors arm: a
+          // freshly created pane (or a freshly mapped panel window) must
+          // appear in place, not fly in from pre-layout coordinates.
+          property bool geometrySettled: false
+          Timer {
+            interval: 100
+            running: pane.entered
+            repeat: false
+            onTriggered: pane.geometrySettled = true
+          }
+
           Behavior on x {
-            enabled: root.animations && root.centeredLayout
+            enabled: root.animations && root.centeredLayout && pane.geometrySettled
             NumberAnimation { duration: 340; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.38, 1.21, 0.22, 1.0, 1, 1] }
           }
           Behavior on y {
-            enabled: root.animations && root.centeredLayout
+            enabled: root.animations && root.centeredLayout && pane.geometrySettled
+            NumberAnimation { duration: 340; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.38, 1.21, 0.22, 1.0, 1, 1] }
+          }
+          Behavior on height {
+            enabled: root.animations && root.centeredLayout && pane.geometrySettled
             NumberAnimation { duration: 340; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.38, 1.21, 0.22, 1.0, 1, 1] }
           }
 

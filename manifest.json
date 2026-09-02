@@ -34,7 +34,7 @@
       "animations": true,
       "summonPlacement": "center",
       "escClosesAll": true,
-      "hoverSelects": true,
+      "hoverSelects": false,
       "layoutStyle": "centered"
     },
     "schema": [
@@ -78,8 +78,8 @@
         "key": "hoverSelects",
         "type": "boolean",
         "label": "Hover moves the selection",
-        "defaultValue": true,
-        "description": "Pointer hover moves the selection and opens submenus after the dwell delay. Off leaves selection to the keyboard and opens submenus only on click."
+        "defaultValue": false,
+        "description": "Pointer hover moves the selection and opens submenus after the dwell delay. Off (the default) leaves selection to the keyboard and opens submenus only on click."
       },
       {
         "key": "desktopRightClick",
