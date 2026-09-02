@@ -437,7 +437,7 @@ Item {
   property var exitSnapshot: null
   Timer {
     id: exitClear
-    interval: 480
+    interval: 380
     repeat: false
     onTriggered: root.exitSnapshot = null
   }
@@ -1204,30 +1204,26 @@ Item {
         sourceComponent: GhostPane { panelItem: panel }
       }
 
-      // A pane closed by walking back slides one slot right and fades out
-      // here instead of blinking out of existence.
+      // A pane closed by walking back is demoted, not discarded: it slides
+      // one slot right in step with the chain while its text drains to the
+      // ghost's muted color, landing exactly where — and looking exactly
+      // how — the ghost preview of that submenu then takes over.
       Loader {
         active: root.centeredLayout && root.animations && root.exitSnapshot !== null
         sourceComponent: GhostPane {
           panelItem: panel
           menuId: root.exitSnapshot ? root.exitSnapshot.menuId : ""
-          dimmed: false
           z: -1
 
           property bool gone: false
           Component.onCompleted: gone = true
+          dimmed: gone
 
           x: (panel.width - width) / 2 + (gone ? root.paneWidth + Style.space(12) : 0)
           y: root.exitSnapshot ? root.exitSnapshot.y : Style.gapsOut
-          opacity: gone ? 0 : 1
 
           Behavior on x {
             NumberAnimation { duration: 340; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.05, 0, 0.133, 0.06, 0.167, 0.4, 0.208, 0.82, 0.25, 1, 1, 1] }
-          }
-          Behavior on opacity {
-            // Accelerating curve: stays visible through most of the slide
-            // and lets the motion, not the fade, carry the exit.
-            NumberAnimation { duration: 420; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.6, 0, 1, 0.45, 1, 1] }
           }
         }
       }
@@ -1730,6 +1726,7 @@ Item {
             font.pixelSize: Style.font.heading
             color: ghost.dimmed ? Color.muted : root.foreground
             elide: Text.ElideRight
+            Behavior on color { ColorAnimation { duration: 320 } }
           }
 
           Text {
@@ -1742,6 +1739,7 @@ Item {
             font.family: root.fontFamily
             font.pixelSize: Style.font.heading
             color: ghost.dimmed ? Color.muted : root.foreground
+            Behavior on color { ColorAnimation { duration: 320 } }
           }
         }
       }
