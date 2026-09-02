@@ -1441,7 +1441,9 @@ Item {
     color: root.background
     borderSpec: root.borderSpec
     clip: true
-    opacity: 0.35
+    // Near-opaque surface so the preview stays legible over busy windows;
+    // the "not yet real" feel comes from muted text, not transparency.
+    opacity: 0.8
 
     Column {
       anchors.fill: parent
@@ -1466,7 +1468,7 @@ Item {
             text: gEntry ? gEntry.icon : ""
             font.family: (gEntry && gEntry.iconFont) ? gEntry.iconFont : root.fontFamily
             font.pixelSize: Style.font.heading
-            color: root.foreground
+            color: Color.muted
           }
           Text {
             anchors.left: parent.left
@@ -1477,7 +1479,7 @@ Item {
             text: gEntry ? MenuModel.labelFor(gEntry, root.checkedResults) : ""
             font.family: root.fontFamily
             font.pixelSize: Style.font.heading
-            color: root.foreground
+            color: Color.muted
             elide: Text.ElideRight
           }
         }
