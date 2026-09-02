@@ -1601,14 +1601,26 @@ Item {
           Text {
             anchors.left: parent.left
             anchors.leftMargin: Style.spacing.sm + root.iconColumn + Style.spacing.xs
-            anchors.right: parent.right
-            anchors.rightMargin: Style.spacing.sm
+            anchors.right: ghostChevron.left
+            anchors.rightMargin: Style.spacing.xs
             anchors.verticalCenter: parent.verticalCenter
             text: gEntry ? MenuModel.labelFor(gEntry, root.checkedResults) : ""
             font.family: root.fontFamily
             font.pixelSize: Style.font.heading
             color: Color.muted
             elide: Text.ElideRight
+          }
+
+          Text {
+            id: ghostChevron
+            anchors.right: parent.right
+            anchors.rightMargin: Style.spacing.sm
+            anchors.verticalCenter: parent.verticalCenter
+            visible: gEntry ? (root.isSubmenu(gEntry) || gEntry.provider !== "") : false
+            text: "\u203a"
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.heading
+            color: Color.muted
           }
         }
       }
