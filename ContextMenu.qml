@@ -1189,8 +1189,15 @@ Item {
           x: root.centeredLayout
             ? centeredX
             : Math.max(Style.gapsOut, overflowsRight ? alternateX : baseX)
+          // Root pane: centered on its natural height. Child panes: top
+          // aligned with the row they were opened from (spec.y carries the
+          // anchor row's level), sliding up only as far as needed to fit —
+          // so a child always vertically intersects its parent instead of
+          // floating at its own center.
           y: root.centeredLayout
-            ? Math.max(Style.gapsOut, (panel.height - naturalHeight) / 2)
+            ? (index === 0
+                ? Math.max(Style.gapsOut, (panel.height - naturalHeight) / 2)
+                : Math.max(Style.gapsOut, Math.min(anchorY, panel.height - Style.gapsOut - naturalHeight)))
             : Math.max(Style.gapsOut, Math.min(baseY, panel.height - height - Style.gapsOut))
 
           // Geometry settles for a beat before the slide Behaviors arm: a
