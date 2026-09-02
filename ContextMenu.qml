@@ -1377,10 +1377,10 @@ Item {
             ? (flippedXEffective ? Item.BottomRight : Item.BottomLeft)
             : (flippedXEffective ? Item.TopRight : Item.TopLeft)
           scale: !root.animations || entered || root.centeredLayout ? 1 : 0.85
-          // Centered layout: no entrance fade — the pane slides in opaque
-          // from the ghost preview's slot, so the preview reads as becoming
-          // the pane while the chain shifts left in the same motion.
-          opacity: !root.animations || entered || root.centeredLayout ? 1 : 0
+          // Submenu panes enter opaque (the slide from the ghost slot is
+          // the transition); the root pane of a fresh summon fades in where
+          // it stands.
+          opacity: !root.animations || entered || (root.centeredLayout && index > 0) ? 1 : 0
 
           transform: Translate {
             // Only submenu panes slide in from the ghost slot; the root pane
