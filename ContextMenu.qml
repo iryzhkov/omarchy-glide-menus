@@ -114,6 +114,12 @@ Item {
   readonly property int maxProbeBytes: 262144
   readonly property int maxFilterChars: 128
 
+  // Exit status a bounded helper uses to report that its producer went over
+  // the byte ceiling. It is carried by the process status, never by the data
+  // stream, and it is the authoritative overflow signal: the byte count is
+  // taken at the producer, before anything is decoded in this process.
+  readonly property int helperOverflowExit: 9
+
   function boundText(value, max) {
     var s = String(value === undefined || value === null ? "" : value)
     return s.length > max ? s.slice(0, max) : s
@@ -148,6 +154,12 @@ Item {
     return out
   }
 
+  // Called only for a read whose helper exited 0, which is what proves the
+  // file was under the byte ceiling. The length test below is a redundant
+  // one-way check: UTF-8 never uses fewer bytes than the string has UTF-16
+  // code units, so more code units than maxMenuFileBytes always means more
+  // bytes as well. It can never be the reason truncated input is accepted,
+  // because it is not what accepts input in the first place.
   function parseMenuText(t) {
     t = String(t || "")
     if (t.length > root.maxMenuFileBytes) {
@@ -175,28 +187,116 @@ Item {
       "/bin/bash", "-c", String(script)]
   }
 
-  // Same contract, with the byte ceiling enforced inside the pipeline: the
-  // producer's stdout runs through head, so no more than capBytes + 1 bytes
-  // can ever reach this process, before any QML framing or collection. The
-  // extra byte is deliberate — output longer than capBytes arrives truncated
-  // to capBytes + 1, the QML side sees length > capBytes, and the run is
-  // discarded rather than parsed (fail closed). When head stops reading, the
-  // producer dies on SIGPIPE, so an unbounded writer is also stopped at the
-  // source.
-  function helperPipeline(seconds, script, capBytes) {
-    return root.helperCommand(seconds,
-      "{\n" + String(script) + "\n} | /usr/bin/head -c " + (capBytes + 1))
+  // The bounded body of a helper: the byte ceiling is enforced *and counted*
+  // at the producer, and the verdict is reported out of band as the process
+  // exit status, never mixed into the data stream.
+  //
+  // head caps the stream at capBytes + 1 bytes before anything reaches this
+  // process, and kills an unbounded writer with SIGPIPE at the source. tee
+  // copies those bytes to the real stdout (fd 4) while wc counts them, so
+  // the count is of raw bytes as produced, not of anything this process has
+  // decoded. A count above capBytes means the producer had more to say than
+  // the ceiling allows, so the helper exits helperOverflowExit and every
+  // consumer discards the run before decoding or parsing it.
+  //
+  // The byte count deliberately does not travel through QML string length.
+  // A QML string holds UTF-16 code units, so comparing its length with a
+  // byte ceiling under-counts multibyte data and can make truncated output
+  // look acceptable; and a byte-truncated tail is not valid UTF-8 anyway, so
+  // the decoded length cannot be trusted to reconstruct it.
+  function boundedBody(script, capBytes) {
+    return "exec 4>&1\n"
+      + "n=$({\n" + String(script) + "\n} | /usr/bin/head -c " + (capBytes + 1)
+      + " | /usr/bin/tee /dev/fd/4 | /usr/bin/wc -c)\n"
+      + "n=${n//[^0-9]/}\n"
+      + "[ -n \"$n\" ] || exit " + root.helperOverflowExit + "\n"
+      + "[ \"$n\" -gt " + capBytes + " ] && exit " + root.helperOverflowExit + "\n"
+      + "exit 0\n"
   }
 
-  // Cancel a running helper and let its wrapper acknowledge the teardown.
-  // signal(15) delivers TERM to the timeout wrapper, which forwards it to
-  // the child's own process group and, per --kill-after, KILLs that group
-  // two seconds later if it survives. The Process's exited signal is the
-  // acknowledgement that the wrapper (and therefore the reaped tree) is
-  // gone; every start site already refuses to start while running is true,
-  // so a helper is never replaced before that acknowledgement.
+  function helperPipeline(seconds, script, capBytes) {
+    return root.helperCommand(seconds, root.boundedBody(script, capBytes))
+  }
+
+  // True when a helper's run may be consumed: it ended on its own terms and
+  // its producer stayed under the ceiling. Anything else — a non-zero exit,
+  // a crash, a timeout kill, an overflow — fails closed.
+  function helperRunUsable(exitCode, exitStatus) {
+    return exitCode === 0 && exitStatus === 0
+  }
+
+  // Cancellation is an explicit process-group teardown that is verified
+  // rather than assumed.
+  //
+  // GNU timeout makes itself the leader of a new process group and runs the
+  // helper tree inside it, so the wrapper's own pid is that group's id.
+  // signal(15) therefore delivers TERM to the whole group, and timeout's
+  // --kill-after escalates the group to KILL two seconds later. The
+  // wrapper's exited signal is the acknowledgement that the wrapper itself
+  // is reaped, and every start site refuses to start while running is true,
+  // so a helper is never replaced before that acknowledgement arrives.
+  //
+  // What exited cannot prove is that no descendant escaped the group, so the
+  // group id is handed to the sweeper below, which independently KILLs the
+  // group and only forgets it once a probe confirms no process in it is left.
+  // The sweep runs off to the side: it never delays a fresh helper, because
+  // a fresh helper gets a new group of its own.
+  property var teardownGroups: []
+
   function cancelHelper(proc) {
-    if (proc.running) proc.signal(15)
+    if (!proc.running) return
+    var pgid = proc.processId
+    proc.signal(15)
+    if (pgid > 0 && root.teardownGroups.indexOf(pgid) < 0) {
+      var pending = root.teardownGroups.slice()
+      pending.push(pgid)
+      root.teardownGroups = pending
+      teardownSweep.restart()
+    }
+  }
+
+  // Long enough for TERM plus timeout's two-second KILL escalation to have
+  // run their course, so the usual case is confirmed dead on the first pass.
+  Timer {
+    id: teardownSweep
+    interval: 3500
+    repeat: false
+    onTriggered: root.sweepTeardownGroups()
+  }
+
+  function sweepTeardownGroups() {
+    if (root.teardownGroups.length === 0 || reaperProc.running) return
+    var groups = root.teardownGroups.slice()
+    var list = ""
+    for (var i = 0; i < groups.length; i++) list += " " + String(groups[i])
+    reaperProc.sweeping = groups
+    reaperProc.command = root.helperCommand(5,
+        "rc=0\n"
+      + "for g in" + list + "; do\n"
+      + "  /usr/bin/kill -KILL -- \"-$g\" 2>/dev/null\n"
+      + "  /usr/bin/kill -0 -- \"-$g\" 2>/dev/null && rc=1\n"
+      + "done\n"
+      + "exit $rc\n")
+    reaperProc.running = true
+  }
+
+  // Forces and then verifies the death of every group a cancellation left
+  // behind. rc 0 means no process answered for any of them, which is the
+  // proof that the teardown completed; anything else schedules another pass.
+  Process {
+    id: reaperProc
+    property var sweeping: []
+    onExited: function(exitCode, exitStatus) {
+      if (exitCode === 0 && exitStatus === 0) {
+        var swept = reaperProc.sweeping
+        var left = []
+        for (var i = 0; i < root.teardownGroups.length; i++)
+          if (swept.indexOf(root.teardownGroups[i]) < 0) left.push(root.teardownGroups[i])
+        root.teardownGroups = left
+      }
+      reaperProc.sweeping = []
+      if (root.teardownGroups.length > 0) teardownSweep.restart()
+    }
   }
 
   function shellQuoted(s) {
@@ -504,11 +604,10 @@ Item {
     root.loadProvidersForOpenPanes()
   }
 
-  // Cancel every non-interactive helper with an acknowledged teardown: TERM
-  // to the wrapper, which timeout forwards to the child's process group and
-  // escalates to KILL after two seconds; each Process's exited signal then
-  // confirms the tree is reaped. Start sites all refuse to start while
-  // running is true, so no helper is replaced before its acknowledgement.
+  // Cancel every non-interactive helper. Each cancellation is the acknowledged
+  // group teardown described at cancelHelper: TERM to the group, KILL two
+  // seconds later, the wrapper's exited signal as the acknowledgement, and a
+  // sweep afterwards that confirms nothing in the group survived.
   function cancelHelpers() {
     pointerProc.cancelled = true
     root.cancelHelper(pointerProc)
@@ -821,15 +920,45 @@ Item {
   // ------------------------------------------------------------- sources
 
   // The FileViews only watch; they never load. Reading goes through a
-  // bounded helper instead, so an oversized menu file is truncated by head
-  // at the producer — before any allocation in the resident shell — and the
-  // helper refuses symlinks and non-regular files before opening. A read
-  // that comes back over the cap or from a rejected path yields an empty
-  // item list (fail closed), never a partial parse.
+  // bounded helper instead, and the helper opens the file exactly once and
+  // then validates the descriptor it is holding — never the pathname.
+  //
+  // The pathname is opened first, into fd 3. Everything after that
+  // interrogates the open file description through /proc/self/fd/3, which is
+  // an fstat of the object actually opened, not a fresh walk of a mutable
+  // path, so nothing can be swapped in between a check and the read:
+  //
+  //   * stat -L reports the opened object's type, owner, link count and
+  //     mode. It must be a regular file (a FIFO, device or directory is
+  //     refused), owned by this user or by root (the default menu is a
+  //     root-owned system file), with exactly one link and no group or
+  //     other write bit.
+  //   * readlink resolves the descriptor back to the path it really came
+  //     from, which must equal the physical form of the path that was asked
+  //     for. That is what refuses a symlinked leaf, and it validates the
+  //     parent components too, since a redirected directory anywhere along
+  //     the path lands the descriptor somewhere else than the one requested.
+  //
+  // The bytes are then streamed from fd 3 itself, so the file that was
+  // validated is exactly the file that is read. A FIFO left at the path
+  // blocks the open instead of returning a descriptor; the helper's deadline
+  // covers that, and the timeout kill is a non-zero exit like any other
+  // rejection. Every failure — a refused open, a failed check, an overflow —
+  // yields an empty item list rather than a partial parse.
   function menuReadScript(path) {
     var q = root.shellQuoted(path)
-    return "[[ -f " + q + " && ! -L " + q + " ]] || exit 3\n"
-      + "exec /usr/bin/head -c " + (root.maxMenuFileBytes + 1) + " -- " + q
+    return "p=" + q + "\n"
+      + "{ exec 3< \"$p\" ; } 2>/dev/null || exit 3\n"
+      + "i=$(/usr/bin/stat -L -c '%F|%u|%h|%f' /proc/self/fd/3) || exit 3\n"
+      + "IFS='|' read -r ftype fuid fnlink fmode <<< \"$i\"\n"
+      + "[ \"$ftype\" = 'regular file' ] || exit 3\n"
+      + "[ \"$fnlink\" = 1 ] || exit 3\n"
+      + "[ \"$fuid\" = \"$(/usr/bin/id -u)\" ] || [ \"$fuid\" = 0 ] || exit 3\n"
+      + "(( 0x$fmode & 0022 )) && exit 3\n"
+      + "real=$(/usr/bin/readlink /proc/self/fd/3) || exit 3\n"
+      + "want=$( { cd -P -- \"${p%/*}\" && pwd -P ; } 2>/dev/null )/${p##*/}\n"
+      + "[ \"$real\" = \"$want\" ] || exit 3\n"
+      + root.boundedBody("/usr/bin/cat <&3", root.maxMenuFileBytes)
   }
 
   function boundedMenuRead(proc) {
@@ -844,19 +973,23 @@ Item {
     property string menuPath: ""
     property var apply: null
     property bool readPending: false
-    stdout: StdioCollector {
-      // The producer is capped by head, so this collector can never be
-      // handed more than maxMenuFileBytes + 1 bytes.
-      onStreamFinished: {
-        if (reader.apply) reader.apply(root.parseMenuText(text))
-        root.rebuild()
-      }
-    }
+    stdout: StdioCollector { id: readerCollector }
+    // The read is consumed only here, once the helper's exit status has said
+    // the descriptor passed every check and the producer stayed under the
+    // ceiling. Nothing is parsed from the collector on its own, so the order
+    // in which the stream and the process finish cannot let a rejected or
+    // truncated read through.
     onExited: function(exitCode, exitStatus) {
-      if (exitCode !== 0 || exitStatus !== 0) {
-        if (reader.apply) reader.apply([])
-        root.rebuild()
-      }
+      var usable = root.helperRunUsable(exitCode, exitStatus)
+      // A rejection is otherwise indistinguishable from an empty menu file,
+      // so say which file was refused and how: exit 3 is a failed check on
+      // the opened descriptor, helperOverflowExit is a file over the byte
+      // ceiling, and anything else is the deadline or a killed helper.
+      if (!usable)
+        console.warn("glide-menus: refused menu source " + reader.menuPath
+                     + " (exit " + exitCode + ", status " + exitStatus + ")")
+      if (reader.apply) reader.apply(usable ? root.parseMenuText(readerCollector.text) : [])
+      root.rebuild()
       if (reader.readPending) Qt.callLater(function() { root.boundedMenuRead(reader) })
     }
   }
@@ -924,18 +1057,21 @@ Item {
     id: guardProc
     property string collected: ""
     stdout: SplitParser {
-      // Bounded upstream by the head stage in helperPipeline; this cap is a
-      // second layer, not the enforcement point.
+      // Accumulation only. The ceiling is enforced and reported by the
+      // producer, so this stops appending at an absurd size and does not
+      // touch the process: cancelling a helper is a teardown with an
+      // acknowledgement, never a bare running = false.
       onRead: function(data) {
-        if (guardProc.collected.length > root.maxHelperBytes) { guardProc.running = false; return }
+        if (guardProc.collected.length > root.maxHelperBytes) return
         guardProc.collected += data + "\n"
       }
     }
     onExited: function(exitCode, exitStatus) {
-      // A killed batch only reported the rows it reached, and output that
-      // hit the byte ceiling arrived truncated. Keep the last complete
-      // answer rather than let a partial one hide things at random.
-      if (exitCode !== 0 || exitStatus !== 0 || guardProc.collected.length > root.maxHelperBytes) {
+      // A killed batch only reported the rows it reached, and an overflow
+      // run arrived truncated; the helper's exit status says which. Keep the
+      // last complete answer rather than let a partial one hide rows at
+      // random.
+      if (!root.helperRunUsable(exitCode, exitStatus)) {
         if (root.guardsPending) Qt.callLater(function() { root.evaluateGuards() })
         return
       }
@@ -1143,18 +1279,16 @@ Item {
     property string providerKey: ""
     property string collected: ""
     stdout: SplitParser {
-      // Bounded upstream by the head stage in helperPipeline; this cap is a
-      // second layer, not the enforcement point.
+      // Accumulation only, as in guardProc: the producer owns the ceiling.
       onRead: function(data) {
-        if (providerProc.collected.length > root.maxHelperBytes) { providerProc.running = false; return }
+        if (providerProc.collected.length > root.maxHelperBytes) return
         providerProc.collected += data + "\n"
       }
     }
     onExited: function(exitCode, exitStatus) {
-      // Output that hit the byte ceiling arrived truncated: discard it and
-      // let the submenu retry, rather than merge a half list.
-      if (exitCode === 0 && exitStatus === 0
-          && providerProc.collected.length <= root.maxHelperBytes)
+      // An overflow run arrived truncated and the exit status says so:
+      // discard it and let the submenu retry, rather than merge a half list.
+      if (root.helperRunUsable(exitCode, exitStatus))
         root.mergeProviderRows(providerProc.collected, providerProc.menuId, providerProc.providerKey)
       else
         root.markProviderLoaded(providerProc.menuId, false)
@@ -1181,13 +1315,13 @@ Item {
     id: pointerProc
     property string route: "root"
     property bool cancelled: false
-    // Bounded by the head stage in helperPipeline: the collector can never
-    // be handed more than maxProbeBytes + 1 bytes.
     command: root.helperPipeline(3, "hyprctl -j cursorpos; echo '@@'; hyprctl -j monitors", root.maxProbeBytes)
-    stdout: StdioCollector {
-      onStreamFinished: {
-        if (!pointerProc.cancelled) root.openAtProbedPointer(text)
-      }
+    stdout: StdioCollector { id: pointerCollector }
+    // Consumed only on a clean exit, so a truncated or killed probe can
+    // never place a menu from a half-read monitor list.
+    onExited: function(exitCode, exitStatus) {
+      if (!pointerProc.cancelled && root.helperRunUsable(exitCode, exitStatus))
+        root.openAtProbedPointer(pointerCollector.text)
     }
   }
 
@@ -1199,9 +1333,6 @@ Item {
   }
 
   function openAtProbedPointer(text) {
-    // Over the ceiling means truncated hyprctl output: fail closed, do not
-    // open a menu from a half-parsed monitor list.
-    if (String(text || "").length > root.maxProbeBytes) return
     var parts = String(text || "").split("@@")
     var cursor = null
     var monitors = []
