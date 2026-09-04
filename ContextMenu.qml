@@ -119,6 +119,9 @@ Item {
   // stream, and it is the authoritative overflow signal: the byte count is
   // taken at the producer, before anything is decoded in this process.
   readonly property int helperOverflowExit: 9
+  // The supervisor's own failure code: it could not confirm the helper's
+  // group empty within its five-second sweep. Never a usable run.
+  readonly property int helperSupervisorExit: 7
 
   function boundText(value, max) {
     var s = String(value === undefined || value === null ? "" : value)
@@ -170,10 +173,86 @@ Item {
   }
 
   // Helper scripts run through fixed absolute executables with a minimal
-  // explicit environment (no login shell, no inherited profile) and a hard
-  // deadline. GNU timeout puts the child in its own process group and
-  // signals the whole group, TERM then KILL, so the tree cannot outlive the
-  // deadline; Process reaps on exit.
+  // explicit environment (no login shell, no inherited profile), a hard
+  // deadline, and a supervisor that owns the helper's whole process group
+  // from start to verified end.
+  //
+  // The Process's direct child is the supervisor below. It starts GNU
+  // timeout as the leader of a new process group with the script inside it,
+  // and it does not exit until that group is provably empty. So the
+  // Process's exited signal is the acknowledgement that the tree is gone,
+  // not an assumption about it, and every start site refuses to start while
+  // running is true, so a helper is never replaced before that arrives.
+  //
+  // Cancellation (signal(15) from cancelHelper, or the Process being torn
+  // down) reaches the supervisor, which forwards TERM to the group; timeout
+  // escalates the group to KILL two seconds later. Every signal the
+  // supervisor sends is bound to process identity first: a group signal
+  // only while the leader still exists with that pgid and its recorded
+  // start time, and, once the leader is gone, per-member KILLs only to
+  // processes whose pgid is still that group. A pid or pgid recycled to
+  // something else fails those checks and is never signalled. Orphans that
+  // escaped the leader (a grandchild that survived the group TERM) are
+  // swept the same way until none is left, or the supervisor gives up after
+  // five seconds with its own exit code, which no consumer accepts.
+  //
+  // The supervisor is a fixed script; the deadline and the helper body are
+  // positional arguments, never spliced into it.
+  readonly property string helperSupervisor:
+      "deadline=$1\n"
+    + "body=$2\n"
+    + "exec 5<> <(:)\n"
+    + "/usr/bin/timeout --kill-after=2 \"$deadline\" /bin/bash -c \"$body\" &\n"
+    + "leader=$!\n"
+    // pgid and start time of a pid, from /proc, only when it belongs to the
+    // leader's group. Fields after the comm ')' : 3 is pgrp, 20 starttime.
+    + "ident() {\n"
+    + "  local l\n"
+    + "  read -r l < \"/proc/$1/stat\" 2>/dev/null || return 1\n"
+    + "  l=${l##*) }\n"
+    + "  set -- $l\n"
+    + "  [ \"$3\" = \"$leader\" ] || return 1\n"
+    + "  printf '%s' \"${20}\"\n"
+    + "}\n"
+    // timeout moves itself into its own group right after starting; wait
+    // for that to be visible before recording the identity.
+    + "start=\"\"\n"
+    + "for _ in 1 2 3 4 5 6 7 8 9 10; do\n"
+    + "  start=$(ident \"$leader\") && break\n"
+    + "  read -t 0.01 -r -u 5 _ || :\n"
+    + "done\n"
+    + "group_ok() { [ -n \"$start\" ] && [ \"$(ident \"$leader\")\" = \"$start\" ]; }\n"
+    + "stops=0\n"
+    + "stop() { stops=$((stops + 1)); group_ok && /usr/bin/kill -TERM -- \"-$leader\" 2>/dev/null; }\n"
+    + "trap stop TERM INT HUP\n"
+    // wait is interrupted by the trap; go back to it until it returned on
+    // its own, which is the leader's real exit status.
+    + "while :; do\n"
+    + "  before=$stops\n"
+    + "  wait \"$leader\" 2>/dev/null; rc=$?\n"
+    + "  [ \"$before\" = \"$stops\" ] && break\n"
+    + "done\n"
+    // The leader is reaped. Anything still in its group is an orphan of the
+    // helper; KILL each one, but only after confirming it is still in that
+    // group, until a full pass finds nothing.
+    + "tries=0\n"
+    + "while :; do\n"
+    + "  left=0\n"
+    + "  for p in $(/usr/bin/pgrep -g \"$leader\"); do\n"
+    + "    read -r l < \"/proc/$p/stat\" 2>/dev/null || continue\n"
+    + "    l=${l##*) }\n"
+    + "    set -- $l\n"
+    + "    [ \"$3\" = \"$leader\" ] || continue\n"
+    + "    /usr/bin/kill -KILL \"$p\" 2>/dev/null && left=1\n"
+    + "  done\n"
+    + "  [ \"$left\" = 0 ] && break\n"
+    + "  tries=$((tries + 1))\n"
+    + "  [ \"$tries\" -gt 100 ] && exit " + root.helperSupervisorExit + "\n"
+    + "  read -t 0.05 -r -u 5 _ || :\n"
+    + "done\n"
+    + "[ \"$stops\" -gt 0 ] && exit 143\n"
+    + "exit \"$rc\"\n"
+
   function helperCommand(seconds, script) {
     return ["/usr/bin/env", "-i",
       "PATH=/usr/local/bin:/usr/bin:/bin",
@@ -183,8 +262,8 @@ Item {
       "HYPRLAND_INSTANCE_SIGNATURE=" + Quickshell.env("HYPRLAND_INSTANCE_SIGNATURE"),
       "WAYLAND_DISPLAY=" + Quickshell.env("WAYLAND_DISPLAY"),
       "OMARCHY_PATH=" + root.omarchyPath,
-      "/usr/bin/timeout", "--kill-after=2", String(seconds),
-      "/bin/bash", "-c", String(script)]
+      "/bin/bash", "-c", root.helperSupervisor,
+      "glide-menus-helper", String(seconds), String(script)]
   }
 
   // The bounded body of a helper: the byte ceiling is enforced *and counted*
@@ -225,78 +304,16 @@ Item {
     return exitCode === 0 && exitStatus === 0
   }
 
-  // Cancellation is an explicit process-group teardown that is verified
-  // rather than assumed.
-  //
-  // GNU timeout makes itself the leader of a new process group and runs the
-  // helper tree inside it, so the wrapper's own pid is that group's id.
-  // signal(15) therefore delivers TERM to the whole group, and timeout's
-  // --kill-after escalates the group to KILL two seconds later. The
-  // wrapper's exited signal is the acknowledgement that the wrapper itself
-  // is reaped, and every start site refuses to start while running is true,
-  // so a helper is never replaced before that acknowledgement arrives.
-  //
-  // What exited cannot prove is that no descendant escaped the group, so the
-  // group id is handed to the sweeper below, which independently KILLs the
-  // group and only forgets it once a probe confirms no process in it is left.
-  // The sweep runs off to the side: it never delays a fresh helper, because
-  // a fresh helper gets a new group of its own.
-  property var teardownGroups: []
-
+  // Cancellation is one TERM to the supervisor, which owns the rest: TERM to
+  // the helper's group, KILL two seconds later, an identity-checked sweep of
+  // anything that escaped, and only then its own exit. That exit is the
+  // Process's exited signal, which is the acknowledgement every start site
+  // waits for before starting the next run. There is no record kept on this
+  // side and no delayed sweep, so nothing here can ever signal a pid or a
+  // group after it has been recycled.
   function cancelHelper(proc) {
     if (!proc.running) return
-    var pgid = proc.processId
     proc.signal(15)
-    if (pgid > 0 && root.teardownGroups.indexOf(pgid) < 0) {
-      var pending = root.teardownGroups.slice()
-      pending.push(pgid)
-      root.teardownGroups = pending
-      teardownSweep.restart()
-    }
-  }
-
-  // Long enough for TERM plus timeout's two-second KILL escalation to have
-  // run their course, so the usual case is confirmed dead on the first pass.
-  Timer {
-    id: teardownSweep
-    interval: 3500
-    repeat: false
-    onTriggered: root.sweepTeardownGroups()
-  }
-
-  function sweepTeardownGroups() {
-    if (root.teardownGroups.length === 0 || reaperProc.running) return
-    var groups = root.teardownGroups.slice()
-    var list = ""
-    for (var i = 0; i < groups.length; i++) list += " " + String(groups[i])
-    reaperProc.sweeping = groups
-    reaperProc.command = root.helperCommand(5,
-        "rc=0\n"
-      + "for g in" + list + "; do\n"
-      + "  /usr/bin/kill -KILL -- \"-$g\" 2>/dev/null\n"
-      + "  /usr/bin/kill -0 -- \"-$g\" 2>/dev/null && rc=1\n"
-      + "done\n"
-      + "exit $rc\n")
-    reaperProc.running = true
-  }
-
-  // Forces and then verifies the death of every group a cancellation left
-  // behind. rc 0 means no process answered for any of them, which is the
-  // proof that the teardown completed; anything else schedules another pass.
-  Process {
-    id: reaperProc
-    property var sweeping: []
-    onExited: function(exitCode, exitStatus) {
-      if (exitCode === 0 && exitStatus === 0) {
-        var swept = reaperProc.sweeping
-        var left = []
-        for (var i = 0; i < root.teardownGroups.length; i++)
-          if (swept.indexOf(root.teardownGroups[i]) < 0) left.push(root.teardownGroups[i])
-        root.teardownGroups = left
-      }
-      reaperProc.sweeping = []
-      if (root.teardownGroups.length > 0) teardownSweep.restart()
-    }
   }
 
   function shellQuoted(s) {
@@ -604,10 +621,8 @@ Item {
     root.loadProvidersForOpenPanes()
   }
 
-  // Cancel every non-interactive helper. Each cancellation is the acknowledged
-  // group teardown described at cancelHelper: TERM to the group, KILL two
-  // seconds later, the wrapper's exited signal as the acknowledgement, and a
-  // sweep afterwards that confirms nothing in the group survived.
+  // Cancel every helper that belongs to an open menu. Each cancellation is
+  // the supervised group teardown described at cancelHelper.
   function cancelHelpers() {
     pointerProc.cancelled = true
     root.cancelHelper(pointerProc)
@@ -617,7 +632,24 @@ Item {
     root.guardsPending = false
   }
 
-  Component.onDestruction: root.cancelHelpers()
+  // Everything this component ever started, for when the component itself
+  // goes away (plugin disabled, shell reload): the menu-open helpers above,
+  // both menu-file readers, and the wallpaper picker, which may otherwise
+  // sit in its picker for up to ten minutes with no owner. Each one's
+  // supervisor carries the teardown through on its own once signalled, so
+  // nothing outlives the destruction except the supervisors finishing that
+  // work. There is no separate teardown worker to stop: the supervisors are
+  // the teardown workers.
+  function cancelAllHelpers() {
+    root.cancelHelpers()
+    defaultMenuReader.readPending = false
+    userMenuReader.readPending = false
+    root.cancelHelper(defaultMenuReader)
+    root.cancelHelper(userMenuReader)
+    root.cancelHelper(wallpaperProc)
+  }
+
+  Component.onDestruction: root.cancelAllHelpers()
 
   function close() {
     root.cancelHelpers()
