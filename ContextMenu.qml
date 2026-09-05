@@ -364,7 +364,12 @@ Item {
   property bool searchProvidersLoaded: false
 
   onFilterTextChanged: {
-    root.selectedIndex = root.filterText.length > 0 ? 0 : -1
+    // A select pane always has a row under the cursor, filtered or not: Enter
+    // with nothing selected would answer the caller with nothing.
+    root.selectedIndex = (root.filterText.length > 0 || root.dmenuMode === "select") ? 0 : -1
+    // Nothing in a select or input pane comes from the menu tree, so there is
+    // no subtree to pull providers in for.
+    if (root.dmenuActive) return
     // First keystroke of a search: pull in every provider-backed submenu this
     // plugin can fill (Apps above all), so their rows are searchable too.
     if (root.filterText.length > 0 && !root.searchProvidersLoaded) {
@@ -379,6 +384,278 @@ Item {
     }
   }
 
+  // ------------------------------------------------------- select / input
+  //
+  // Declaring `clonedFrom: omarchy.menu` in the manifest makes this plugin
+  // the target of every summon of that id — including the ones that are not
+  // a menu at all. `omarchy-menu-select` and `omarchy-menu-input` back the
+  // keybindings menu, the Herdr menus, the emoji and clipboard pickers and
+  // every other dmenu-style script; each of them summons omarchy.menu with
+  //
+  //   { mode: "select" | "input", prompt, options, selectionFile, doneFile,
+  //     width, maxHeight }
+  //
+  // and then blocks in a polling loop until doneFile exists. So a clone that
+  // ignores `mode` does not merely show the wrong thing: the caller never
+  // returns, and every invocation leaves another stuck shell script behind.
+  //
+  // One invariant keeps that from happening: while `requestActive` is true,
+  // every path that ends the request answers it. finishRequest() is the only
+  // place that clears the flag, close() is the choke point every dismissal
+  // goes through, and a summon that supersedes a request answers it before
+  // taking the state over.
+
+  property string dmenuMode: "menu"
+  readonly property bool dmenuActive: root.dmenuMode === "select" || root.dmenuMode === "input"
+  property string dmenuPrompt: ""
+  property var dmenuOptions: []
+  property string selectionFile: ""
+  property string doneFile: ""
+  property bool requestActive: false
+  // The file that tells this request's watchdog it is still needed, and the
+  // counter that keeps two overlapping requests from sharing one.
+  property string ackFlag: ""
+  property int watchdogSerial: 0
+  // Both in the shell's spacing units, as the payload sends them. 0 means the
+  // caller did not ask, so the pane keeps its configured width and the screen
+  // is the only ceiling on its height.
+  property int dmenuWidth: 0
+  property int dmenuMaxHeight: 0
+
+  readonly property int maxSummonPayloadBytes: 4000000
+  readonly property int maxDmenuOptions: 20000
+  readonly property int maxOptionChars: 1024
+  readonly property int maxPathChars: 4096
+  readonly property int maxInputChars: 1024
+
+  function sanitizeOptions(list) {
+    if (!Array.isArray(list)) return []
+    var out = list.slice(0, root.maxDmenuOptions)
+    for (var i = 0; i < out.length; i++) out[i] = root.boundText(out[i], root.maxOptionChars)
+    return out
+  }
+
+  // A result path is used as a path and nothing else: the writer receives it
+  // as a positional argument and never as script text, so the only thing left
+  // to check is shape. It must be absolute — a relative path would resolve
+  // against this process's working directory, which is not the caller's — and
+  // free of the newline and NUL no mktemp path contains. The summon channel
+  // is the user's own IPC socket, so a path arriving here already carries
+  // that user's authority; this is a check on shape, not a privilege border.
+  function resultPath(value) {
+    var path = root.boundText(value, root.maxPathChars)
+    if (path.indexOf("/") !== 0) return ""
+    if (path.indexOf("\n") >= 0 || path.indexOf(String.fromCharCode(0)) >= 0) return ""
+    return path
+  }
+
+  // The rows a select summon draws. An option is "<label>",
+  // "<glyph>\t<label>", or "<glyph>\t<label>\t<subtext>": the glyph shows but
+  // never returns, and the subtext renders under the label and travels back
+  // with the selection, which is what gives callers a stable key for rows
+  // that share a label.
+  readonly property var dmenuRows: {
+    if (root.dmenuMode !== "select") return []
+    var query = root.filterText.trim().toLowerCase()
+    var out = []
+    for (var i = 0; i < root.dmenuOptions.length; i++) {
+      var parts = String(root.dmenuOptions[i]).split("\t")
+      var icon = parts.length > 1 ? parts.shift() : ""
+      var label = parts.shift() || ""
+      var detail = parts.join("\t")
+      if (query && label.toLowerCase().indexOf(query) < 0
+          && detail.toLowerCase().indexOf(query) < 0) continue
+      out.push({
+        id: "dmenu." + i, parent: "", kind: "dmenu",
+        icon: icon, iconFont: "", appIcon: "", appId: "",
+        label: label, title: "", target: "", description: detail,
+        action: "", provider: "", aliases: [], when: "", checked: "", order: i
+      })
+    }
+    return out
+  }
+
+  // Subtext costs a taller row, and the whole pane takes the same height or
+  // the gliding highlight — which multiplies one row height by an index —
+  // would land between rows.
+  readonly property bool dmenuHasDetail: {
+    for (var i = 0; i < root.dmenuOptions.length; i++)
+      if (String(root.dmenuOptions[i]).split("\t").length > 2) return true
+    return false
+  }
+
+  // Which screen a summon with no coordinates opens on. The cascade's own
+  // summon path asks Hyprland where the pointer is, but that is a subprocess,
+  // and a select summon must not depend on one: a probe that fails, times out
+  // or is superseded would leave the pane unopened with a caller already
+  // blocked on it. Screens are known in this process, so this answers at
+  // once — the screen the menu last used while it still exists, else the
+  // first. An empty return means nothing can display the pane at all.
+  function summonScreen() {
+    var screens = Quickshell.screens
+    if (!screens || screens.length === 0) return ""
+    for (var i = 0; i < screens.length; i++)
+      if (String(screens[i].name) === root.targetScreen) return root.targetScreen
+    return String(screens[0].name)
+  }
+
+  function openDmenu(payload) {
+    var screenName = root.summonScreen()
+
+    // Clears the cascade and answers whatever request it is replacing, before
+    // this one is installed over it.
+    root.openPane(screenName, { menuId: "", x: 0, y: 0 }, true)
+
+    root.dmenuMode = String(payload.mode) === "input" ? "input" : "select"
+    root.dmenuPrompt = root.boundText(payload.prompt
+      || (root.dmenuMode === "input" ? "Input" : "Select"), root.maxFieldChars)
+    root.dmenuOptions = root.sanitizeOptions(payload.options)
+    root.selectionFile = root.resultPath(payload.selectionFile)
+    root.doneFile = root.resultPath(payload.doneFile)
+    root.requestActive = root.doneFile !== ""
+    root.dmenuWidth = root.finiteNum(payload.width, 0, 4000, 0)
+    root.dmenuMaxHeight = root.finiteNum(payload.maxHeight, 0, 4000, 0)
+    root.selectedIndex = root.dmenuMode === "select" ? 0 : -1
+
+    if (payload.doneFile && !root.doneFile)
+      console.warn("glide-menus: select summon carries an unusable doneFile, caller cannot be answered")
+
+    // Armed before anything can go wrong with the pane itself.
+    root.armWatchdog(root.doneFile)
+
+    // No screen to draw on: there is no Escape to press, so answer now rather
+    // than leave the caller polling a menu that can never appear.
+    if (screenName === "") {
+      console.warn("glide-menus: select summon arrived with no screen to show it on")
+      root.close()
+    }
+  }
+
+  // The one hang the invariant above cannot close. Every path *this plugin*
+  // takes answers the request, but the shell being killed outright — a
+  // segfault, a SIGKILL, the OOM killer — takes the answer with it, and the
+  // caller is left polling a doneFile nothing will ever create. Anything that
+  // outlives that has to be outside the process, so a request that carries a
+  // doneFile arms this first: a detached shell that waits for either the
+  // answer to appear or the shell it is shadowing to disappear, and writes
+  // the answer itself in the second case.
+  //
+  // It costs one sleeping process for as long as the picker is on screen —
+  // and it never spawns another, so it is cheaper than the polling loop the
+  // caller is already running — and it exits within a tick of the menu
+  // answering normally. The hour is the outer bound for a picker nobody ever
+  // comes back to.
+  //
+  // The process it watches is identified by pid *and* start time, read
+  // straight from /proc, so a pid recycled to something else reads as the
+  // shell being gone rather than as the shell still running. If that
+  // identity cannot be established the watchdog exits without arming: a
+  // watchdog that cannot tell the difference would answer the caller while
+  // the picker is still on screen, which is worse than not having one.
+  function armWatchdog(donePath) {
+    root.ackFlag = ""
+    if (!donePath) return
+
+    var runtimeDir = String(Quickshell.env("XDG_RUNTIME_DIR") || "")
+    // Without a runtime directory there is nowhere to put a flag only this
+    // plugin can clear, and a watchdog that cannot be called off is worse
+    // than none: it would outlive every picker it was armed for.
+    if (runtimeDir.indexOf("/") !== 0) return
+
+    root.watchdogSerial += 1
+    var flagPath = runtimeDir + "/glide-menus-req-" + Quickshell.processId + "-" + root.watchdogSerial
+    root.ackFlag = flagPath
+
+    Quickshell.execDetached(["/usr/bin/env", "-i", "PATH=/usr/local/bin:/usr/bin:/bin",
+      "/usr/bin/timeout", "--kill-after=5", "3600", "/bin/bash", "-c",
+        "pid=$1\n"
+      + "done=$2\n"
+      + "flag=$3\n"
+      + "stat=/proc/$pid/stat\n"
+      // The flag is what says the request is still outstanding. The plugin
+      // clears it as it answers, which is the only reliable end signal: the
+      // caller deletes doneFile on its way out, often within the same tick
+      // this loop would have seen it in, so waiting on doneFile would leave
+      // this process running long after the picker was answered.
+      + "{ : > \"$flag\"; } 2>/dev/null || exit 0\n"
+      // Fields after the comm ')' : 20 is the process start time.
+      + "cur=\n"
+      + "ident() {\n"
+      + "  local l\n"
+      + "  cur=\n"
+      // The redirection itself fails once the process is gone, and that
+      // message belongs to nobody: silence the whole compound, not just read.
+      + "  { read -r l < \"$stat\"; } 2>/dev/null || return 1\n"
+      + "  l=${l##*) }\n"
+      + "  set -- $l\n"
+      + "  cur=${20}\n"
+      + "}\n"
+      + "ident\n"
+      + "start=$cur\n"
+      + "[ -n \"$start\" ] || { rm -f \"$flag\"; exit 0; }\n"
+      // A tick that costs no process: a read with a timeout on an empty pipe.
+      + "exec 5<> <(:)\n"
+      + "while [ -e \"$flag\" ]; do\n"
+      + "  ident\n"
+      + "  [ \"$cur\" = \"$start\" ] || break\n"
+      + "  read -t 0.25 -r -u 5 _ || :\n"
+      + "done\n"
+      // The flag still being there is what distinguishes the two ways out:
+      // the shell died with the request unanswered, so answer it here.
+      + "if [ -e \"$flag\" ]; then\n"
+      + "  [ -e \"$done\" ] || : > \"$done\"\n"
+      + "  rm -f \"$flag\"\n"
+      + "fi\n"
+      + "exit 0\n",
+      "glide-menus-watchdog", String(Quickshell.processId), donePath, flagPath])
+  }
+
+  // The acknowledgement the caller is blocked on. Writing the selection and
+  // then creating doneFile is what ends its polling loop, so this runs on
+  // every way out of a request — a pick, Escape, click-away, a superseding
+  // summon, the host hiding the plugin, the plugin being torn down — and it
+  // clears the flag before writing anything, so a second call for the same
+  // request cannot answer it twice.
+  function finishRequest(selection) {
+    if (!root.requestActive) return
+
+    var selectionPath = (selection === null || selection === undefined) ? "" : root.selectionFile
+    var donePath = root.doneFile
+    var flagPath = root.ackFlag
+    var value = selectionPath ? String(selection) : ""
+
+    root.requestActive = false
+    root.selectionFile = ""
+    root.doneFile = ""
+    root.ackFlag = ""
+    if (!donePath) return
+
+    // The one helper here that is deliberately not supervised. Every other
+    // helper produces output this plugin consumes, so it has to be owned and
+    // its exit awaited; this one produces nothing and exists only to unblock
+    // a process outside the shell. Detaching it is what makes the answer
+    // survive the plugin being torn down in the same frame it was sent —
+    // exactly the case that would otherwise hang a caller for good. Nothing
+    // is spliced into the script: the paths and the value arrive as
+    // positional arguments, and timeout bounds a write to a path that turns
+    // out not to accept one.
+    //
+    // Clearing the watchdog's flag is part of the same answer, so the two
+    // cannot disagree about whether the request is still outstanding.
+    Quickshell.execDetached(["/usr/bin/env", "-i", "PATH=/usr/local/bin:/usr/bin:/bin",
+      "/usr/bin/timeout", "--kill-after=1", "5", "/bin/bash", "-c",
+        "[ -n \"$1\" ] && printf '%s\\n' \"$3\" > \"$1\"\n"
+      + ": > \"$2\"\n"
+      + "[ -n \"$4\" ] && rm -f \"$4\"\n"
+      + "exit 0\n",
+      "glide-menus-ack", selectionPath, donePath, value, flagPath])
+  }
+
+  function applyDmenuSelection(value) {
+    root.finishRequest(value)
+    root.dismiss()
+  }
+
   // ------------------------------------------------------------- surfaces
   //
   // Shares the [menu] theme tokens, so a theme that styles the built-in menu
@@ -391,12 +668,30 @@ Item {
   readonly property int cornerRadius: Style.cornerRadius
   readonly property string fontFamily: Style.font.menuFamily
 
-  readonly property int paneWidth: Style.space(root.finiteNum(root.setting("paneWidth", 300), 120, 520, 300))
+  // A select summon sizes the pane itself — the keybindings menu asks for 800
+  // because its rows are two padded columns — and the configured pane width
+  // applies to the cascade, which is not what is on screen then.
+  readonly property int paneWidth: root.dmenuActive && root.dmenuWidth > 0
+    ? Style.space(root.dmenuWidth)
+    : Style.space(root.finiteNum(root.setting("paneWidth", 300), 120, 520, 300))
   // Same row metric as the built-in menu card, so the two feel like one
-  // family rather than a dense context menu next to an airy launcher.
-  readonly property int rowHeight: Math.max(Style.space(50), Style.font.body + Style.spacing.rowPaddingX * 2)
+  // family rather than a dense context menu next to an airy launcher. Select
+  // rows with a subtext get the taller of the two, for the same reason the
+  // built-in card has two row heights.
+  readonly property int rowHeight: root.dmenuActive && root.dmenuHasDetail
+    ? Math.max(Style.space(58), Style.font.body + Style.font.caption + Style.spacing.rowPaddingX * 2)
+    : Math.max(Style.space(50), Style.font.body + Style.spacing.rowPaddingX * 2)
   readonly property int panePadding: Style.spacing.xs
   readonly property int iconColumn: Style.space(30)
+
+  // The height ceiling a select summon asked for, in the same spacing units
+  // as its width. 0 leaves the screen as the only limit.
+  readonly property int dmenuHeightCap: root.dmenuActive && root.dmenuMaxHeight > 0
+    ? Style.space(root.dmenuMaxHeight) : 0
+
+  function capHeight(h) {
+    return root.dmenuHeightCap > 0 ? Math.min(h, root.dmenuHeightCap) : h
+  }
 
   // ---------------------------------------------------------------- data
 
@@ -430,6 +725,11 @@ Item {
   // What a pane actually draws: its rows, filtered by the type-ahead when it
   // is the pane being typed at.
   function visibleRows(depth) {
+    // A select summon draws one pane and its rows come from the payload, not
+    // from the menu tree. Input mode has no rows at all: what it collects is
+    // the type-ahead itself.
+    if (root.dmenuActive) return depth === 0 ? root.dmenuRows : []
+
     var spec = root.panes[depth]
     if (!spec) return []
 
@@ -546,7 +846,12 @@ Item {
     })
   }
 
-  function openPane(screenName, spec) {
+  function openPane(screenName, spec, forDmenu) {
+    // Every way into the menu lands here, which makes it the one place a
+    // superseding summon can answer the select/input request it is taking the
+    // state away from. Answering is a no-op when there is none.
+    root.finishRequest(null)
+
     root.targetScreen = root.boundText(screenName, 128)
     root.originX = spec.x
     root.originY = spec.y
@@ -558,6 +863,14 @@ Item {
     exitClear.stop()
     root.exitSnapshot = null
     root.opened = true
+
+    // A select or input pane draws its rows from the payload, so the menu
+    // tree behind it is not consulted and nothing needs to be evaluated or
+    // filled in for it. openDmenu installs its own state right after this.
+    if (forDmenu) return
+
+    root.dmenuMode = "menu"
+    root.dmenuOptions = []
     // Guards are cheap and their answers go stale (is a recording running? is
     // night light on?), so re-run them each time the menu is summoned rather
     // than trusting the set from the last open.
@@ -649,15 +962,30 @@ Item {
     root.cancelHelper(wallpaperProc)
   }
 
-  Component.onDestruction: root.cancelAllHelpers()
+  // The request is answered before the helpers are torn down: the answer is
+  // detached (see finishRequest), so it outlives this component, and a plugin
+  // disabled or reloaded mid-request must not take a blocked caller with it.
+  Component.onDestruction: {
+    root.finishRequest(null)
+    root.cancelAllHelpers()
+  }
 
+  // The choke point every dismissal reaches: Escape, click-away, walking back
+  // out of the last pane, activating anything, the host hiding the plugin.
+  // Answering the pending request here is what makes the invariant hold
+  // without every one of those paths having to remember it. A pick answers
+  // with its value first, which clears the flag, so this cannot overwrite it
+  // with a cancel afterwards.
   function close() {
+    root.finishRequest(null)
     root.cancelHelpers()
     root.opened = false
     root.panes = []
     root.paneGeometry = []
     root.filterText = ""
     root.selectedIndex = -1
+    root.dmenuMode = "menu"
+    root.dmenuOptions = []
   }
 
   function dismiss() {
@@ -804,6 +1132,16 @@ Item {
   function activate(depth, entry, paneX, paneY, rowY) {
     if (!entry) return
 
+    // A select row opens nothing and runs nothing: activating it is the
+    // answer the caller is waiting for. The subtext goes back with the label,
+    // tab separated, because that is the key callers match rows on.
+    if (root.dmenuActive) {
+      root.applyDmenuSelection(entry.description
+        ? entry.label + "\t" + entry.description
+        : entry.label)
+      return
+    }
+
     if (entry.kind === "app") {
       var appId = entry.appId
       var label = entry.label
@@ -892,6 +1230,12 @@ Item {
   }
 
   function activateSelected() {
+    // Input mode has no rows to select: Enter returns what has been typed.
+    if (root.dmenuMode === "input") {
+      root.applyDmenuSelection(root.filterText)
+      return
+    }
+
     var entry = root.selectedEntry()
     if (!entry) return
     var depth = root.panes.length - 1
@@ -903,13 +1247,19 @@ Item {
 
   function goBack() {
     if (root.filterText.length > 0) { root.filterText = ""; return }
+    // There is nothing above a select pane, and walking out of one would
+    // cancel the caller's request by accident. Escape is the way to cancel.
+    if (root.dmenuActive) return
     if (root.panes.length > 1) root.truncate(root.panes.length - 1)
     else root.dismiss()
   }
 
   function handleKey(event) {
     if (event.key === Qt.Key_Escape) {
-      if (root.escClosesAll) root.dismiss()
+      // A select or input pane is one level deep and a caller is waiting on
+      // it, so Escape always cancels outright — the walk-back reading of the
+      // setting has nothing to walk back to here.
+      if (root.escClosesAll || root.dmenuActive) root.dismiss()
       else root.goBack()
       event.accepted = true
     } else if (event.key === Qt.Key_Down || (event.key === Qt.Key_Tab && !(event.modifiers & Qt.ShiftModifier))) {
@@ -943,7 +1293,10 @@ Item {
       event.accepted = true
     } else if (event.text && event.text.length > 0 && event.text.charCodeAt(0) >= 0x20
                && !(event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))) {
-      if (root.filterText.length < root.maxFilterChars)
+      // Input mode collects an answer rather than a search term — a reminder,
+      // a filename — so it gets the longer ceiling.
+      var cap = root.dmenuMode === "input" ? root.maxInputChars : root.maxFilterChars
+      if (root.filterText.length < cap)
         root.filterText += root.boundText(event.text, 8)
       event.accepted = true
     }
@@ -1432,8 +1785,25 @@ Item {
   // toggle already knows whether the menu is showing.
   function open(payloadJson) {
     var payload = ({})
-    try { payload = JSON.parse(root.boundText(payloadJson || "{}", 4096)) } catch (e) { payload = ({}) }
-    root.openAtPointer(root.boundText(payload.menu || payload.route || "root", 200))
+    // The ceiling here is on a summon, not on a menu-sized budget. A select
+    // payload carries every option its caller has — the keybindings menu
+    // sends about 30 KB — and truncating one does not merely lose rows: the
+    // JSON stops parsing, the mode is never seen, the pane never opens as a
+    // picker, and the caller blocks on a doneFile nothing will ever create.
+    try {
+      payload = JSON.parse(root.boundText(payloadJson || "{}", root.maxSummonPayloadBytes))
+    } catch (e) {
+      payload = ({})
+    }
+
+    // A summon of omarchy.menu is not always a menu: the dmenu-style scripts
+    // ask for a picker or a prompt through the same entry point.
+    if (payload.mode === "select" || payload.mode === "input") {
+      root.openDmenu(payload)
+      return
+    }
+
+    root.openAtPointer(root.boundText(payload.initialMenu || payload.menu || payload.route || "root", 200))
   }
 
   IpcHandler {
@@ -1677,7 +2047,9 @@ Item {
           readonly property var rows: root.visibleRows(index)
           readonly property bool deepest: index === root.panes.length - 1
           readonly property string paneFilter: deepest ? root.filterText : String(spec.filter || "")
-          readonly property bool filtering: paneFilter.length > 0
+          // A select or input pane shows the header from the start: it is
+          // where the prompt lives, and in input mode it is the whole pane.
+          readonly property bool filtering: paneFilter.length > 0 || root.dmenuActive
           readonly property int headerHeight: filtering ? root.rowHeight : 0
 
           // Flip left of the anchor rather than run off the right edge, and
@@ -1704,8 +2076,17 @@ Item {
           // height, not its live height: the top edge — and with it the
           // type-ahead input — stays put while a search changes the row
           // count, and the pane only grows or shrinks downward.
+          // Rows the pane sizes itself for. Input mode has none — its header
+          // is the whole pane — and a select pane counts its own filtered
+          // rows, since the menu tree behind it is empty. The header only
+          // joins the sum for those two: in the cascade it appears and
+          // disappears with the search, and this height is what the top edge
+          // is placed from, which has to stay still while one is typed.
+          readonly property int sizedRows: root.dmenuMode === "input" ? 0 : Math.max(rows.length, 1)
           readonly property real naturalHeight: Math.min(
-            Math.max(root.displayRows(spec.menuId).length, 1) * root.rowHeight + root.panePadding * 2,
+            root.capHeight((root.dmenuActive ? pane.headerHeight : 0)
+              + (root.dmenuActive ? sizedRows : Math.max(root.displayRows(spec.menuId).length, 1))
+                * root.rowHeight + root.panePadding * 2),
             panel.height - Style.gapsOut * 2)
 
           x: root.centeredLayout
@@ -1754,9 +2135,11 @@ Item {
             NumberAnimation { duration: 340; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.05, 0, 0.133, 0.06, 0.167, 0.4, 0.208, 0.82, 0.25, 1, 1, 1] }
           }
 
-          width: root.paneWidth
+          // A select summon may ask for more width than the screen has; the
+          // configured cascade width can only do that on a very small one.
+          width: Math.min(root.paneWidth, panel.width - Style.gapsOut * 2)
           height: Math.min(
-            headerHeight + Math.max(rows.length, 1) * root.rowHeight + root.panePadding * 2,
+            root.capHeight(headerHeight + sizedRows * root.rowHeight + root.panePadding * 2),
             root.centeredLayout
               ? panel.height - y - Style.gapsOut
               : panel.height - Style.gapsOut * 2)
@@ -1831,6 +2214,8 @@ Item {
 
           // The type-ahead, shown only once something has been typed. It is
           // what makes a 400-row Apps submenu usable without a search card.
+          // A select or input summon shows it from the start instead, with
+          // the caller's prompt standing in until something is typed over it.
           Item {
             id: filterHeader
             visible: pane.filtering
@@ -1841,22 +2226,26 @@ Item {
               anchors.fill: parent
               anchors.leftMargin: Style.spacing.sm
               verticalAlignment: Text.AlignVCenter
-              text: "󰍉  " + pane.paneFilter
+              text: "󰍉  " + (pane.paneFilter.length > 0
+                ? pane.paneFilter
+                : (root.dmenuActive ? root.dmenuPrompt + "…" : ""))
               textFormat: Text.PlainText
               font.family: root.fontFamily
               font.pixelSize: Style.font.heading
-              color: root.selectedText
+              color: pane.paneFilter.length > 0 ? root.selectedText : Qt.darker(root.foreground, 1.5)
               elide: Text.ElideRight
             }
           }
 
           Text {
-            visible: pane.rows.length === 0
+            // Input mode is meant to be empty: there is nothing to say about
+            // a prompt that has not been answered yet.
+            visible: pane.rows.length === 0 && root.dmenuMode !== "input"
             anchors.fill: parent
             anchors.topMargin: pane.headerHeight + root.panePadding
             anchors.leftMargin: Style.spacing.sm + root.iconColumn
             verticalAlignment: Text.AlignVCenter
-            text: pane.filtering ? "No matches" : "…"
+            text: pane.paneFilter.length > 0 ? "No matches" : "…"
             font.family: root.fontFamily
             font.pixelSize: Style.font.heading
             color: Qt.darker(root.foreground, 1.5)
@@ -2028,11 +2417,15 @@ Item {
               }
 
               Text {
+                id: labelText
                 anchors.left: parent.left
                 anchors.leftMargin: Style.spacing.sm + root.iconColumn + Style.spacing.xs
                 anchors.right: pathHint.visible ? pathHint.left : chevron.left
                 anchors.rightMargin: Style.spacing.xs
-                anchors.verticalCenter: parent.verticalCenter
+                // A row with a subtext stacks the two lines around the row's
+                // middle instead of centering the label on it.
+                anchors.verticalCenter: subtext.visible ? undefined : parent.verticalCenter
+                anchors.bottom: subtext.visible ? subtext.top : undefined
                 text: row.entry ? MenuModel.labelFor(row.entry, root.checkedResults) : ""
                 textFormat: Text.PlainText
                 font.family: root.fontFamily
@@ -2042,6 +2435,23 @@ Item {
                 color: row.entry && row.entry.kind === "hint"
                   ? Qt.darker(root.foreground, 1.5)
                   : (row.active ? root.selectedText : root.foreground)
+                elide: Text.ElideRight
+              }
+
+              // The subtext a select option may carry. It is caller-supplied
+              // detail that identifies the row — which window, which file —
+              // so unlike the cascade's own descriptions it always shows.
+              Text {
+                id: subtext
+                visible: root.dmenuActive && text !== ""
+                anchors.left: labelText.left
+                anchors.right: labelText.right
+                anchors.top: parent.verticalCenter
+                text: (root.dmenuActive && row.entry) ? String(row.entry.description || "") : ""
+                textFormat: Text.PlainText
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                color: row.active ? root.selectedText : Qt.darker(root.foreground, 1.5)
                 elide: Text.ElideRight
               }
 

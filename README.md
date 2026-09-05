@@ -37,6 +37,15 @@ interaction around a centered, animated cascade.
 - Escape closes the whole cascade; Left, Backspace (on an empty filter),
   and right-click walk back one pane. Hover selection is off by default
   and available as a setting.
+- **Stands in for the picker menus too.** Replacing the built-in menu means
+  taking over every summon of `omarchy.menu`, and not all of them are the
+  menu tree: `omarchy-menu-select` and `omarchy-menu-input` back the
+  keybindings menu, the Herdr menus, the emoji and clipboard pickers, and
+  any script that asks the menu for a choice or a line of text. Those open
+  as a single centered pane with the caller's prompt in the type-ahead,
+  honoring the width and height the caller asked for, and they answer it on
+  every way out — a pick, Escape, a click away, or another summon arriving
+  over the top.
 
 Three levels deep — the active pane stays centered, ancestors trail off
 the left edge, and the fonts shortlist ends in a search hint:
