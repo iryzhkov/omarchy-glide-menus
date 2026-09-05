@@ -572,12 +572,16 @@ Item {
       + "done=$2\n"
       + "flag=$3\n"
       + "stat=/proc/$pid/stat\n"
+      + "umask 077\n"
       // The flag is what says the request is still outstanding. The plugin
       // clears it as it answers, which is the only reliable end signal: the
       // caller deletes doneFile on its way out, often within the same tick
       // this loop would have seen it in, so waiting on doneFile would leave
       // this process running long after the picker was answered.
       + "{ : > \"$flag\"; } 2>/dev/null || exit 0\n"
+      // However this process ends — answering, the deadline, a TERM — the
+      // flag goes with it, so nothing of it is left in the runtime directory.
+      + "trap 'rm -f \"$flag\"' EXIT\n"
       // Fields after the comm ')' : 20 is the process start time.
       + "cur=\n"
       + "ident() {\n"
@@ -592,7 +596,9 @@ Item {
       + "}\n"
       + "ident\n"
       + "start=$cur\n"
-      + "[ -n \"$start\" ] || { rm -f \"$flag\"; exit 0; }\n"
+      // No identity, no watchdog: one that cannot tell a live shell from a
+      // recycled pid would answer a caller whose picker is still on screen.
+      + "[ -n \"$start\" ] || exit 0\n"
       // A tick that costs no process: a read with a timeout on an empty pipe.
       + "exec 5<> <(:)\n"
       + "while [ -e \"$flag\" ]; do\n"
@@ -602,9 +608,11 @@ Item {
       + "done\n"
       // The flag still being there is what distinguishes the two ways out:
       // the shell died with the request unanswered, so answer it here.
-      + "if [ -e \"$flag\" ]; then\n"
-      + "  [ -e \"$done\" ] || : > \"$done\"\n"
-      + "  rm -f \"$flag\"\n"
+      // Unlinked before writing for the same reason the answer above is: a
+      // symlink standing at the path is destroyed rather than followed.
+      + "if [ -e \"$flag\" ] && [ ! -e \"$done\" ]; then\n"
+      + "  rm -f \"$done\"\n"
+      + "  : > \"$done\"\n"
       + "fi\n"
       + "exit 0\n",
       "glide-menus-watchdog", String(Quickshell.processId), donePath, flagPath])
@@ -642,9 +650,20 @@ Item {
     //
     // Clearing the watchdog's flag is part of the same answer, so the two
     // cannot disagree about whether the request is still outstanding.
+    // Both files are unlinked before they are written, never truncated in
+    // place. The caller's own mktemp names are unpredictable, but that is its
+    // guarantee to make, not one to inherit: unlinking first means a symlink
+    // standing at either path is destroyed rather than followed, so this can
+    // only ever write the two files it was given. The umask keeps the
+    // recreated files owner-only, as mktemp made them.
     Quickshell.execDetached(["/usr/bin/env", "-i", "PATH=/usr/local/bin:/usr/bin:/bin",
       "/usr/bin/timeout", "--kill-after=1", "5", "/bin/bash", "-c",
-        "[ -n \"$1\" ] && printf '%s\\n' \"$3\" > \"$1\"\n"
+        "umask 077\n"
+      + "if [ -n \"$1\" ]; then\n"
+      + "  rm -f \"$1\"\n"
+      + "  printf '%s\\n' \"$3\" > \"$1\"\n"
+      + "fi\n"
+      + "rm -f \"$2\"\n"
       + ": > \"$2\"\n"
       + "[ -n \"$4\" ] && rm -f \"$4\"\n"
       + "exit 0\n",
