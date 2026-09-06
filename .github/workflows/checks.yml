@@ -1,0 +1,29 @@
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # qmllint and qmltestrunner both come from Qt 6's declarative tools. The
+      # Omarchy shell is not present here, so the qs.Commons and qs.Ui imports
+      # do not resolve; .qmllint.ini turns off the categories that would report
+      # that, which is what lets the same command give the same verdict here
+      # and on a desktop.
+      - name: Install Qt 6 QML tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qt6-declarative-dev-tools qml6-module-qttest qml6-module-qtqml qml6-module-qtquick
+
+      - name: Lint
+        run: scripts/lint
+
+      - name: Test
+        run: scripts/test

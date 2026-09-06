@@ -1,0 +1,78 @@
+#!/bin/bash
+
+# Lint every QML file in this plugin, and syntax-check every shell script.
+#
+# Run it before committing, and let CI run it on push. Any warning fails the
+# run: `-W 0` is what makes that true, because qmllint's own default is
+# -1, which prints warnings and still exits 0. The categories that cannot be
+# judged outside a running Quickshell are turned off in .qmllint.ini, so
+# whatever survives is worth reading.
+#
+# Usage: scripts/lint [file ...]     (default: every tracked QML file)
+
+set -uo pipefail
+
+PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$PROJECT_DIR" || exit 1
+
+# qmllint ships with Qt 6 and is not always on PATH: Arch keeps it in the Qt 6
+# bin directory, Debian and Ubuntu name it qmllint6.
+qmllint=""
+for candidate in qmllint qmllint6 /usr/lib/qt6/bin/qmllint /usr/lib/qt6/libexec/qmllint; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    qmllint=$candidate
+    break
+  fi
+done
+
+if [[ -z $qmllint ]]; then
+  echo "lint: no qmllint found (install qt6-declarative, or qt6-declarative-dev-tools)" >&2
+  exit 2
+fi
+
+# Omarchy's shell singletons are imported as qs.Commons and qs.Ui, which means
+# a module root holding a directory literally named `qs`. The installed shell
+# is that directory under another name, so the import path is a symlink made
+# for the run and removed with it. Absent -- on a CI runner, say -- the plugin
+# still lints; ImportFailure is off precisely so the verdict does not depend on
+# which machine this runs on.
+import_args=()
+shell_dir=${OMARCHY_PATH:-/usr/share/omarchy}/shell
+tmp_import=""
+if [[ -d $shell_dir ]]; then
+  tmp_import=$(mktemp -d) || exit 1
+  ln -s "$shell_dir" "$tmp_import/qs"
+  import_args=(-I "$tmp_import")
+fi
+cleanup() { [[ -n $tmp_import ]] && rm -rf "$tmp_import"; }
+trap cleanup EXIT
+
+if (($# > 0)); then
+  files=("$@")
+else
+  mapfile -t files < <(git ls-files '*.qml' 2>/dev/null || find . -name '*.qml' -not -path './.git/*')
+fi
+
+status=0
+
+if ((${#files[@]} > 0)); then
+  # The plugin's own directory is an import path too, so a component in one
+  # file resolves when another instantiates it.
+  "$qmllint" -W 0 "${import_args[@]}" -I . "${files[@]}" || status=1
+else
+  echo "lint: no QML files to check" >&2
+fi
+
+# Shell helpers ship with the plugin and run on a user's machine; a syntax
+# error in one is found here or at the worst possible moment.
+mapfile -t scripts < <(git ls-files 'bin/*' 'scripts/*' 2>/dev/null)
+for script in "${scripts[@]}"; do
+  [[ -f $script ]] || continue
+  head -1 "$script" | grep -q '^#!.*\(bash\|sh\)' || continue
+  bash -n "$script" || status=1
+done
+
+if ((status == 0)); then
+  echo "lint: clean"
+fi
+exit $status

@@ -1,0 +1,59 @@
+#!/bin/bash
+
+# Run this plugin's test suite: the pure JavaScript it was split into, checked
+# through Qt Quick Test without a compositor, a shell or a screen.
+#
+# What is testable here is what does not need Quickshell running: parsing,
+# sanitizing, geometry. The QML that talks to Hyprland is not, and is not
+# pretended to be.
+#
+# Usage: scripts/test
+
+set -uo pipefail
+
+PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$PROJECT_DIR" || exit 1
+
+if [[ ! -d tests ]]; then
+  echo "test: no tests directory"
+  exit 0
+fi
+
+runner=""
+for candidate in qmltestrunner qmltestrunner6 /usr/lib/qt6/bin/qmltestrunner /usr/lib/qt6/libexec/qmltestrunner; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    runner=$candidate
+    break
+  fi
+done
+
+if [[ -z $runner ]]; then
+  echo "test: no qmltestrunner found (install qt6-declarative, or qml6-module-qttest)" >&2
+  exit 2
+fi
+
+# No display is needed and none should be required: these tests touch no
+# windows, and a runner that waits for a compositor would hang in CI.
+export QT_QPA_PLATFORM=offscreen
+
+status=0
+
+# qmltestrunner exits non-zero when it finds nothing to run, so ask only when
+# there is something: a plugin whose only tests are shell ones is not a failure.
+shopt -s nullglob
+qml_tests=(tests/tst_*.qml)
+shopt -u nullglob
+
+if ((${#qml_tests[@]} > 0)); then
+  "$runner" -input tests "$@" || status=1
+fi
+
+# Some checks cannot be made from inside the QML engine -- executing a helper
+# script and watching what it leaves behind, for one. Those live as shell tests
+# beside the QML ones.
+for shell_test in tests/*.sh; do
+  [[ -f $shell_test ]] || continue
+  bash "$shell_test" || status=1
+done
+
+exit $status
