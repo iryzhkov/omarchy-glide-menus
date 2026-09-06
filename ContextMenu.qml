@@ -27,6 +27,8 @@ import QtQuick
 import qs.Commons
 import qs.Ui
 import "MenuModel.js" as MenuModel
+import "Sanitize.js" as Sanitize
+import "Helper.js" as Helper
 
 Item {
   id: root
@@ -92,11 +94,11 @@ Item {
   readonly property bool centeredLayout: String(root.setting("layoutStyle", "centered")) !== "anchored"
   readonly property bool escClosesAll: root.setting("escClosesAll", true) !== false
   readonly property bool hoverSelects: root.setting("hoverSelects", false) === true
-  readonly property int appsShown: root.finiteNum(root.setting("appsShown", 12), 0, 100, 12)
+  readonly property int appsShown: Sanitize.finiteNum(root.setting("appsShown", 12), 0, 100, 12)
   readonly property bool desktopRightClick: root.setting("desktopRightClick", true) !== false
   readonly property bool wallpaperDoubleClick: root.setting("wallpaperDoubleClick", true) !== false
   readonly property bool inlineApps: root.setting("inlineApps", true) !== false
-  readonly property int submenuDelay: root.finiteNum(root.setting("submenuDelay", 140), 0, 2000, 140)
+  readonly property int submenuDelay: Sanitize.finiteNum(root.setting("submenuDelay", 140), 0, 2000, 140)
 
   // ------------------------------------------------------ input hardening
   //
@@ -105,203 +107,40 @@ Item {
   // it is parsed or rendered: byte caps before JSON parsing, row and field
   // caps before entries join the model, finite range clamps on numbers.
 
-  readonly property int maxMenuFileBytes: 2000000
-  readonly property int maxModelItems: 10000
-  readonly property int maxFieldChars: 512
-  readonly property int maxHelperBytes: 1000000
-  readonly property int maxProviderRows: 2000
-  readonly property int maxAppRows: 3000
-  readonly property int maxProbeBytes: 262144
-  readonly property int maxFilterChars: 128
+  // The ceilings and the checks live in Sanitize.js, with a test suite of
+  // their own. Each ceiling is re-exported here so the rest of the file still
+  // reads it as root.maxSomething, with Sanitize.js the single place it is set.
+  readonly property int maxMenuFileBytes: Sanitize.MAX_MENU_FILE_BYTES
+  readonly property int maxFieldChars: Sanitize.MAX_FIELD_CHARS
+  readonly property int maxHelperBytes: Sanitize.MAX_HELPER_BYTES
+  readonly property int maxProviderRows: Sanitize.MAX_PROVIDER_ROWS
+  readonly property int maxAppRows: Sanitize.MAX_APP_ROWS
+  readonly property int maxProbeBytes: Sanitize.MAX_PROBE_BYTES
+  readonly property int maxFilterChars: Sanitize.MAX_FILTER_CHARS
 
-  // Exit status a bounded helper uses to report that its producer went over
-  // the byte ceiling. It is carried by the process status, never by the data
-  // stream, and it is the authoritative overflow signal: the byte count is
-  // taken at the producer, before anything is decoded in this process.
-  readonly property int helperOverflowExit: 9
-  // The supervisor's own failure code: it could not confirm the helper's
-  // group empty within its five-second sweep. Never a usable run.
-  readonly property int helperSupervisorExit: 7
+  readonly property int helperOverflowExit: Helper.OVERFLOW_EXIT
+  readonly property int helperSupervisorExit: Helper.SUPERVISOR_EXIT
 
-  function boundText(value, max) {
-    var s = String(value === undefined || value === null ? "" : value)
-    return s.length > max ? s.slice(0, max) : s
-  }
-
-  function finiteNum(value, lo, hi, fallback) {
-    var n = Number(value)
-    if (!isFinite(n)) return fallback
-    return Math.min(hi, Math.max(lo, n))
-  }
-
-  // Cap entry count and every string field before parsed menu content joins
-  // the model.
-  function sanitizeEntries(list) {
-    if (!Array.isArray(list)) return []
-    var out = list.slice(0, root.maxModelItems)
-    var fields = ["id", "parent", "kind", "icon", "iconFont", "label", "title",
-                  "target", "description", "action", "provider", "when", "checked"]
-    for (var i = 0; i < out.length; i++) {
-      var e = out[i]
-      if (!e) continue
-      for (var f = 0; f < fields.length; f++) {
-        if (typeof e[fields[f]] === "string" && e[fields[f]].length > root.maxFieldChars)
-          e[fields[f]] = e[fields[f]].slice(0, root.maxFieldChars)
-      }
-      if (Array.isArray(e.aliases)) {
-        e.aliases = e.aliases.slice(0, 16)
-        for (var a = 0; a < e.aliases.length; a++)
-          e.aliases[a] = root.boundText(e.aliases[a], root.maxFieldChars)
-      }
-    }
-    return out
-  }
-
-  // Called only for a read whose helper exited 0, which is what proves the
-  // file was under the byte ceiling. The length test below is a redundant
-  // one-way check: UTF-8 never uses fewer bytes than the string has UTF-16
-  // code units, so more code units than maxMenuFileBytes always means more
-  // bytes as well. It can never be the reason truncated input is accepted,
-  // because it is not what accepts input in the first place.
-  function parseMenuText(t) {
-    t = String(t || "")
-    if (t.length > root.maxMenuFileBytes) {
-      console.warn("glide-menus: menu source over " + root.maxMenuFileBytes + " bytes, ignoring")
-      return []
-    }
-    return root.sanitizeEntries(MenuModel.parseMenuJsonc(t))
-  }
-
-  // Helper scripts run through fixed absolute executables with a minimal
-  // explicit environment (no login shell, no inherited profile), a hard
-  // deadline, and a supervisor that owns the helper's whole process group
-  // from start to verified end.
-  //
-  // The Process's direct child is the supervisor below. It starts GNU
-  // timeout as the leader of a new process group with the script inside it,
-  // and it does not exit until that group is provably empty. So the
-  // Process's exited signal is the acknowledgement that the tree is gone,
-  // not an assumption about it, and every start site refuses to start while
-  // running is true, so a helper is never replaced before that arrives.
-  //
-  // Cancellation (signal(15) from cancelHelper, or the Process being torn
-  // down) reaches the supervisor, which forwards TERM to the group; timeout
-  // escalates the group to KILL two seconds later. Every signal the
-  // supervisor sends is bound to process identity first: a group signal
-  // only while the leader still exists with that pgid and its recorded
-  // start time, and, once the leader is gone, per-member KILLs only to
-  // processes whose pgid is still that group. A pid or pgid recycled to
-  // something else fails those checks and is never signalled. Orphans that
-  // escaped the leader (a grandchild that survived the group TERM) are
-  // swept the same way until none is left, or the supervisor gives up after
-  // five seconds with its own exit code, which no consumer accepts.
-  //
-  // The supervisor is a fixed script; the deadline and the helper body are
-  // positional arguments, never spliced into it.
-  readonly property string helperSupervisor:
-      "deadline=$1\n"
-    + "body=$2\n"
-    + "exec 5<> <(:)\n"
-    + "/usr/bin/timeout --kill-after=2 \"$deadline\" /bin/bash -c \"$body\" &\n"
-    + "leader=$!\n"
-    // pgid and start time of a pid, from /proc, only when it belongs to the
-    // leader's group. Fields after the comm ')' : 3 is pgrp, 20 starttime.
-    + "ident() {\n"
-    + "  local l\n"
-    + "  read -r l < \"/proc/$1/stat\" 2>/dev/null || return 1\n"
-    + "  l=${l##*) }\n"
-    + "  set -- $l\n"
-    + "  [ \"$3\" = \"$leader\" ] || return 1\n"
-    + "  printf '%s' \"${20}\"\n"
-    + "}\n"
-    // timeout moves itself into its own group right after starting; wait
-    // for that to be visible before recording the identity.
-    + "start=\"\"\n"
-    + "for _ in 1 2 3 4 5 6 7 8 9 10; do\n"
-    + "  start=$(ident \"$leader\") && break\n"
-    + "  read -t 0.01 -r -u 5 _ || :\n"
-    + "done\n"
-    + "group_ok() { [ -n \"$start\" ] && [ \"$(ident \"$leader\")\" = \"$start\" ]; }\n"
-    + "stops=0\n"
-    + "stop() { stops=$((stops + 1)); group_ok && /usr/bin/kill -TERM -- \"-$leader\" 2>/dev/null; }\n"
-    + "trap stop TERM INT HUP\n"
-    // wait is interrupted by the trap; go back to it until it returned on
-    // its own, which is the leader's real exit status.
-    + "while :; do\n"
-    + "  before=$stops\n"
-    + "  wait \"$leader\" 2>/dev/null; rc=$?\n"
-    + "  [ \"$before\" = \"$stops\" ] && break\n"
-    + "done\n"
-    // The leader is reaped. Anything still in its group is an orphan of the
-    // helper; KILL each one, but only after confirming it is still in that
-    // group, until a full pass finds nothing.
-    + "tries=0\n"
-    + "while :; do\n"
-    + "  left=0\n"
-    + "  for p in $(/usr/bin/pgrep -g \"$leader\"); do\n"
-    + "    read -r l < \"/proc/$p/stat\" 2>/dev/null || continue\n"
-    + "    l=${l##*) }\n"
-    + "    set -- $l\n"
-    + "    [ \"$3\" = \"$leader\" ] || continue\n"
-    + "    /usr/bin/kill -KILL \"$p\" 2>/dev/null && left=1\n"
-    + "  done\n"
-    + "  [ \"$left\" = 0 ] && break\n"
-    + "  tries=$((tries + 1))\n"
-    + "  [ \"$tries\" -gt 100 ] && exit " + root.helperSupervisorExit + "\n"
-    + "  read -t 0.05 -r -u 5 _ || :\n"
-    + "done\n"
-    + "[ \"$stops\" -gt 0 ] && exit 143\n"
-    + "exit \"$rc\"\n"
+  // The subprocess harness -- the supervisor script, the byte-bounded body,
+  // and the verdict on a finished run -- lives in Helper.js. It has no
+  // dependency on Quickshell or on this plugin's state, which is what lets a
+  // test execute the supervisor for real; the session values it needs are read
+  // here, where Quickshell.env can be reached, and passed in.
+  readonly property var helperEnv: ({
+    HOME: Quickshell.env("HOME"),
+    USER: Quickshell.env("USER"),
+    XDG_RUNTIME_DIR: Quickshell.env("XDG_RUNTIME_DIR"),
+    HYPRLAND_INSTANCE_SIGNATURE: Quickshell.env("HYPRLAND_INSTANCE_SIGNATURE"),
+    WAYLAND_DISPLAY: Quickshell.env("WAYLAND_DISPLAY"),
+    OMARCHY_PATH: root.omarchyPath
+  })
 
   function helperCommand(seconds, script) {
-    return ["/usr/bin/env", "-i",
-      "PATH=/usr/local/bin:/usr/bin:/bin",
-      "HOME=" + Quickshell.env("HOME"),
-      "USER=" + Quickshell.env("USER"),
-      "XDG_RUNTIME_DIR=" + Quickshell.env("XDG_RUNTIME_DIR"),
-      "HYPRLAND_INSTANCE_SIGNATURE=" + Quickshell.env("HYPRLAND_INSTANCE_SIGNATURE"),
-      "WAYLAND_DISPLAY=" + Quickshell.env("WAYLAND_DISPLAY"),
-      "OMARCHY_PATH=" + root.omarchyPath,
-      "/bin/bash", "-c", root.helperSupervisor,
-      "glide-menus-helper", String(seconds), String(script)]
-  }
-
-  // The bounded body of a helper: the byte ceiling is enforced *and counted*
-  // at the producer, and the verdict is reported out of band as the process
-  // exit status, never mixed into the data stream.
-  //
-  // head caps the stream at capBytes + 1 bytes before anything reaches this
-  // process, and kills an unbounded writer with SIGPIPE at the source. tee
-  // copies those bytes to the real stdout (fd 4) while wc counts them, so
-  // the count is of raw bytes as produced, not of anything this process has
-  // decoded. A count above capBytes means the producer had more to say than
-  // the ceiling allows, so the helper exits helperOverflowExit and every
-  // consumer discards the run before decoding or parsing it.
-  //
-  // The byte count deliberately does not travel through QML string length.
-  // A QML string holds UTF-16 code units, so comparing its length with a
-  // byte ceiling under-counts multibyte data and can make truncated output
-  // look acceptable; and a byte-truncated tail is not valid UTF-8 anyway, so
-  // the decoded length cannot be trusted to reconstruct it.
-  function boundedBody(script, capBytes) {
-    return "exec 4>&1\n"
-      + "n=$({\n" + String(script) + "\n} | /usr/bin/head -c " + (capBytes + 1)
-      + " | /usr/bin/tee /dev/fd/4 | /usr/bin/wc -c)\n"
-      + "n=${n//[^0-9]/}\n"
-      + "[ -n \"$n\" ] || exit " + root.helperOverflowExit + "\n"
-      + "[ \"$n\" -gt " + capBytes + " ] && exit " + root.helperOverflowExit + "\n"
-      + "exit 0\n"
+    return Helper.command(seconds, script, root.helperEnv)
   }
 
   function helperPipeline(seconds, script, capBytes) {
-    return root.helperCommand(seconds, root.boundedBody(script, capBytes))
-  }
-
-  // True when a helper's run may be consumed: it ended on its own terms and
-  // its producer stayed under the ceiling. Anything else — a non-zero exit,
-  // a crash, a timeout kill, an overflow — fails closed.
-  function helperRunUsable(exitCode, exitStatus) {
-    return exitCode === 0 && exitStatus === 0
+    return Helper.pipeline(seconds, script, capBytes, root.helperEnv)
   }
 
   // Cancellation is one TERM to the supervisor, which owns the rest: TERM to
@@ -314,10 +153,6 @@ Item {
   function cancelHelper(proc) {
     if (!proc.running) return
     proc.signal(15)
-  }
-
-  function shellQuoted(s) {
-    return "'" + String(s).replace(/'/g, "'\\''") + "'"
   }
 
   // ---------------------------------------------------------------- state
@@ -422,32 +257,11 @@ Item {
   property int dmenuWidth: 0
   property int dmenuMaxHeight: 0
 
-  readonly property int maxSummonPayloadBytes: 4000000
-  readonly property int maxDmenuOptions: 20000
-  readonly property int maxOptionChars: 1024
-  readonly property int maxPathChars: 4096
-  readonly property int maxInputChars: 1024
-
-  function sanitizeOptions(list) {
-    if (!Array.isArray(list)) return []
-    var out = list.slice(0, root.maxDmenuOptions)
-    for (var i = 0; i < out.length; i++) out[i] = root.boundText(out[i], root.maxOptionChars)
-    return out
-  }
-
-  // A result path is used as a path and nothing else: the writer receives it
-  // as a positional argument and never as script text, so the only thing left
-  // to check is shape. It must be absolute — a relative path would resolve
-  // against this process's working directory, which is not the caller's — and
-  // free of the newline and NUL no mktemp path contains. The summon channel
-  // is the user's own IPC socket, so a path arriving here already carries
-  // that user's authority; this is a check on shape, not a privilege border.
-  function resultPath(value) {
-    var path = root.boundText(value, root.maxPathChars)
-    if (path.indexOf("/") !== 0) return ""
-    if (path.indexOf("\n") >= 0 || path.indexOf(String.fromCharCode(0)) >= 0) return ""
-    return path
-  }
+  // The two summon ceilings this file still enforces itself. The rest --
+  // option count, option width, path length -- are enforced inside
+  // Sanitize.sanitizeOptions and Sanitize.resultPath, and are declared there.
+  readonly property int maxSummonPayloadBytes: Sanitize.MAX_SUMMON_PAYLOAD_BYTES
+  readonly property int maxInputChars: Sanitize.MAX_INPUT_CHARS
 
   // The rows a select summon draws. An option is "<label>",
   // "<glyph>\t<label>", or "<glyph>\t<label>\t<subtext>": the glyph shows but
@@ -507,14 +321,14 @@ Item {
     root.openPane(screenName, { menuId: "", x: 0, y: 0 }, true)
 
     root.dmenuMode = String(payload.mode) === "input" ? "input" : "select"
-    root.dmenuPrompt = root.boundText(payload.prompt
+    root.dmenuPrompt = Sanitize.boundText(payload.prompt
       || (root.dmenuMode === "input" ? "Input" : "Select"), root.maxFieldChars)
-    root.dmenuOptions = root.sanitizeOptions(payload.options)
-    root.selectionFile = root.resultPath(payload.selectionFile)
-    root.doneFile = root.resultPath(payload.doneFile)
+    root.dmenuOptions = Sanitize.sanitizeOptions(payload.options)
+    root.selectionFile = Sanitize.resultPath(payload.selectionFile)
+    root.doneFile = Sanitize.resultPath(payload.doneFile)
     root.requestActive = root.doneFile !== ""
-    root.dmenuWidth = root.finiteNum(payload.width, 0, 4000, 0)
-    root.dmenuMaxHeight = root.finiteNum(payload.maxHeight, 0, 4000, 0)
+    root.dmenuWidth = Sanitize.finiteNum(payload.width, 0, 4000, 0)
+    root.dmenuMaxHeight = Sanitize.finiteNum(payload.maxHeight, 0, 4000, 0)
     root.selectedIndex = root.dmenuMode === "select" ? 0 : -1
 
     if (payload.doneFile && !root.doneFile)
@@ -692,7 +506,7 @@ Item {
   // applies to the cascade, which is not what is on screen then.
   readonly property int paneWidth: root.dmenuActive && root.dmenuWidth > 0
     ? Style.space(root.dmenuWidth)
-    : Style.space(root.finiteNum(root.setting("paneWidth", 300), 120, 520, 300))
+    : Style.space(Sanitize.finiteNum(root.setting("paneWidth", 300), 120, 520, 300))
   // Same row metric as the built-in menu card, so the two feel like one
   // family rather than a dense context menu next to an airy launcher. Select
   // rows with a subtext get the taller of the two, for the same reason the
@@ -860,8 +674,8 @@ Item {
   function openAt(screenName, x, y) {
     root.openPane(screenName, {
       menuId: "root",
-      x: root.finiteNum(x, 0, 32768, 0),
-      y: root.finiteNum(y, 0, 32768, 0)
+      x: Sanitize.finiteNum(x, 0, 32768, 0),
+      y: Sanitize.finiteNum(y, 0, 32768, 0)
     })
   }
 
@@ -871,7 +685,7 @@ Item {
     // state away from. Answering is a no-op when there is none.
     root.finishRequest(null)
 
-    root.targetScreen = root.boundText(screenName, 128)
+    root.targetScreen = Sanitize.boundText(screenName, 128)
     root.originX = spec.x
     root.originY = spec.y
     root.filterText = ""
@@ -902,13 +716,13 @@ Item {
   function openAtAnchor(screenName, x, y, w, h, placement) {
     var spec = {
       menuId: "root",
-      x: root.finiteNum(x, 0, 32768, 0),
-      y: root.finiteNum(y, 0, 32768, 0),
+      x: Sanitize.finiteNum(x, 0, 32768, 0),
+      y: Sanitize.finiteNum(y, 0, 32768, 0),
       flipX: false, flipY: false
     }
-    w = root.finiteNum(w, 0, 32768, 0)
-    h = root.finiteNum(h, 0, 32768, 0)
-    var side = root.boundText(placement || "below", 16)
+    w = Sanitize.finiteNum(w, 0, 32768, 0)
+    h = Sanitize.finiteNum(h, 0, 32768, 0)
+    var side = Sanitize.boundText(placement || "below", 16)
 
     if (side === "above") spec.flipY = true
     else if (side === "left") spec.flipX = true
@@ -924,7 +738,7 @@ Item {
   function openAtRoute(screenName, x, y, menuId) {
     root.openAt(screenName, x, y)
 
-    var route = MenuModel.resolveRoute(root.items, root.itemOrder, root.boundText(menuId, 200))
+    var route = MenuModel.resolveRoute(root.items, root.itemOrder, Sanitize.boundText(menuId, 200))
     var chain = []
     var id = String(route || "")
     var guard = 0
@@ -1316,7 +1130,7 @@ Item {
       // a filename — so it gets the longer ceiling.
       var cap = root.dmenuMode === "input" ? root.maxInputChars : root.maxFilterChars
       if (root.filterText.length < cap)
-        root.filterText += root.boundText(event.text, 8)
+        root.filterText += Sanitize.boundText(event.text, 8)
       event.accepted = true
     }
   }
@@ -1350,7 +1164,7 @@ Item {
   // rejection. Every failure — a refused open, a failed check, an overflow —
   // yields an empty item list rather than a partial parse.
   function menuReadScript(path) {
-    var q = root.shellQuoted(path)
+    var q = Helper.shellQuoted(path)
     return "p=" + q + "\n"
       + "{ exec 3< \"$p\" ; } 2>/dev/null || exit 3\n"
       + "i=$(/usr/bin/stat -L -c '%F|%u|%h|%f' /proc/self/fd/3) || exit 3\n"
@@ -1362,7 +1176,7 @@ Item {
       + "real=$(/usr/bin/readlink /proc/self/fd/3) || exit 3\n"
       + "want=$( { cd -P -- \"${p%/*}\" && pwd -P ; } 2>/dev/null )/${p##*/}\n"
       + "[ \"$real\" = \"$want\" ] || exit 3\n"
-      + root.boundedBody("/usr/bin/cat <&3", root.maxMenuFileBytes)
+      + Helper.boundedBody("/usr/bin/cat <&3", root.maxMenuFileBytes)
   }
 
   function boundedMenuRead(proc) {
@@ -1384,7 +1198,7 @@ Item {
     // in which the stream and the process finish cannot let a rejected or
     // truncated read through.
     onExited: function(exitCode, exitStatus) {
-      var usable = root.helperRunUsable(exitCode, exitStatus)
+      var usable = Helper.runUsable(exitCode, exitStatus)
       // A rejection is otherwise indistinguishable from an empty menu file,
       // so say which file was refused and how: exit 3 is a failed check on
       // the opened descriptor, helperOverflowExit is a file over the byte
@@ -1392,7 +1206,7 @@ Item {
       if (!usable)
         console.warn("glide-menus: refused menu source " + reader.menuPath
                      + " (exit " + exitCode + ", status " + exitStatus + ")")
-      if (reader.apply) reader.apply(usable ? root.parseMenuText(readerCollector.text) : [])
+      if (reader.apply) reader.apply(usable ? Sanitize.parseMenuText(readerCollector.text) : [])
       root.rebuild()
       if (reader.readPending) Qt.callLater(function() { root.boundedMenuRead(reader) })
     }
@@ -1475,7 +1289,7 @@ Item {
       // run arrived truncated; the helper's exit status says which. Keep the
       // last complete answer rather than let a partial one hide rows at
       // random.
-      if (!root.helperRunUsable(exitCode, exitStatus)) {
+      if (!Helper.runUsable(exitCode, exitStatus)) {
         if (root.guardsPending) Qt.callLater(function() { root.evaluateGuards() })
         return
       }
@@ -1598,9 +1412,9 @@ Item {
       var line = lines[i].trim()
       if (!line) continue
       var parts = line.split("\t")
-      var label = root.boundText(parts[0] || "", root.maxFieldChars)
-      var value = root.boundText(parts[1] || parts[0] || "", root.maxFieldChars)
-      var current = root.boundText(parts[2] || "", root.maxFieldChars)
+      var label = Sanitize.boundText(parts[0] || "", root.maxFieldChars)
+      var value = Sanitize.boundText(parts[1] || parts[0] || "", root.maxFieldChars)
+      var current = Sanitize.boundText(parts[2] || "", root.maxFieldChars)
       if (!label) continue
       // Distinct values can slugify alike -- Fira Code and Fira-Code both give
       // fira-code -- and a repeated id is dropped, which would silently lose a
@@ -1643,9 +1457,9 @@ Item {
     var appRows = []
     for (var i = 0; i < entries.length; i++) {
       var entry = entries[i].entry
-      var appId = root.boundText(entry.id || "", root.maxFieldChars)
+      var appId = Sanitize.boundText(entry.id || "", root.maxFieldChars)
       if (!appId) continue
-      var subtext = root.boundText(root.appLibrary.entrySubtext(entry), root.maxFieldChars)
+      var subtext = Sanitize.boundText(root.appLibrary.entrySubtext(entry), root.maxFieldChars)
       var aliases = subtext ? [subtext] : []
       try {
         if (entry.keywords && typeof entry.keywords.join === "function") aliases = aliases.concat(entry.keywords)
@@ -1657,9 +1471,9 @@ Item {
         kind: "app",
         icon: "",
         iconFont: "",
-        appIcon: root.boundText(entry.icon || "", root.maxFieldChars),
+        appIcon: Sanitize.boundText(entry.icon || "", root.maxFieldChars),
         appId: appId,
-        label: root.boundText(root.appLibrary.entryName(entry), root.maxFieldChars),
+        label: Sanitize.boundText(root.appLibrary.entryName(entry), root.maxFieldChars),
         title: "",
         target: "",
         description: subtext,
@@ -1692,7 +1506,7 @@ Item {
     onExited: function(exitCode, exitStatus) {
       // An overflow run arrived truncated and the exit status says so:
       // discard it and let the submenu retry, rather than merge a half list.
-      if (root.helperRunUsable(exitCode, exitStatus))
+      if (Helper.runUsable(exitCode, exitStatus))
         root.mergeProviderRows(providerProc.collected, providerProc.menuId, providerProc.providerKey)
       else
         root.markProviderLoaded(providerProc.menuId, false)
@@ -1724,7 +1538,7 @@ Item {
     // Consumed only on a clean exit, so a truncated or killed probe can
     // never place a menu from a half-read monitor list.
     onExited: function(exitCode, exitStatus) {
-      if (!pointerProc.cancelled && root.helperRunUsable(exitCode, exitStatus))
+      if (!pointerProc.cancelled && Helper.runUsable(exitCode, exitStatus))
         root.openAtProbedPointer(pointerCollector.text)
     }
   }
@@ -1732,7 +1546,7 @@ Item {
   function openAtPointer(route) {
     if (pointerProc.running) return
     pointerProc.cancelled = false
-    pointerProc.route = root.boundText(route || "root", 200)
+    pointerProc.route = Sanitize.boundText(route || "root", 200)
     pointerProc.running = true
   }
 
@@ -1810,7 +1624,7 @@ Item {
     // JSON stops parsing, the mode is never seen, the pane never opens as a
     // picker, and the caller blocks on a doneFile nothing will ever create.
     try {
-      payload = JSON.parse(root.boundText(payloadJson || "{}", root.maxSummonPayloadBytes))
+      payload = JSON.parse(Sanitize.boundText(payloadJson || "{}", root.maxSummonPayloadBytes))
     } catch (e) {
       payload = ({})
     }
@@ -1822,7 +1636,7 @@ Item {
       return
     }
 
-    root.openAtPointer(root.boundText(payload.initialMenu || payload.menu || payload.route || "root", 200))
+    root.openAtPointer(Sanitize.boundText(payload.initialMenu || payload.menu || payload.route || "root", 200))
   }
 
   IpcHandler {
@@ -1847,7 +1661,7 @@ Item {
     // Scripted navigation, equivalent to the arrow keys and Enter. Useful
     // for demos and automated tests; goes through the same code paths.
     function nav(delta: int): void {
-      root.moveSelection(root.finiteNum(delta, -100, 100, 0))
+      root.moveSelection(Sanitize.finiteNum(delta, -100, 100, 0))
     }
 
     function enter(): void {
