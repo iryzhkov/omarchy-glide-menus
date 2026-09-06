@@ -30,8 +30,8 @@ TestCase {
     }
 
     function test_sanitizeEntries_caps_every_string_field() {
-        var long = new Array(Sanitize.MAX_FIELD_CHARS + 200).join("x");
-        var out = Sanitize.sanitizeEntries([{ id: long, label: long, description: long, action: long }]);
+        var padded = new Array(Sanitize.MAX_FIELD_CHARS + 200).join("x");
+        var out = Sanitize.sanitizeEntries([{ id: padded, label: padded, description: padded, action: padded }]);
         compare(out[0].id.length, Sanitize.MAX_FIELD_CHARS);
         compare(out[0].label.length, Sanitize.MAX_FIELD_CHARS);
         compare(out[0].description.length, Sanitize.MAX_FIELD_CHARS);
@@ -105,7 +105,7 @@ TestCase {
     }
 
     function test_resultPath_bounds_length() {
-        var long = "/" + new Array(Sanitize.MAX_PATH_CHARS + 100).join("p");
-        compare(Sanitize.resultPath(long).length, Sanitize.MAX_PATH_CHARS);
+        var padded = "/" + new Array(Sanitize.MAX_PATH_CHARS + 100).join("p");
+        compare(Sanitize.resultPath(padded).length, Sanitize.MAX_PATH_CHARS);
     }
 }

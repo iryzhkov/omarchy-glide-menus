@@ -63,11 +63,29 @@ if ((${#files[@]} > 0)); then
   # The plugin's own directory is an import path too, so a component in one
   # file resolves when another instantiates it.
   lint_output=$("$qmllint" "${import_args[@]}" -I . "${files[@]}" 2>&1)
-  lint_status=$?
   [[ -n $lint_output ]] && printf '%s\n' "$lint_output"
-  # Info-level findings are printed and do not fail; Warning and Error do.
-  if ((lint_status != 0)) || grep -qE '^(Warning|Error):' <<<"$lint_output"; then
-    status=1
+
+  if grep -qE '^(Warning|Error):' <<<"$lint_output"; then
+    # Which findings can be trusted depends on how old this qmllint is. One
+    # new enough for .qmllint.ini to mean anything tags every message with its
+    # [category]; an older one -- Ubuntu's, for instance -- silently ignores
+    # the per-category configuration, so its semantic warnings are the whole
+    # unfiltered wall of unresolved Quickshell types and say nothing about
+    # this code.
+    if grep -qE '\[[a-z-]+\]$' <<<"$lint_output"; then
+      status=1
+    else
+      # Parse errors mean the same thing on every version, so those still fail.
+      # The rest is reported as unjudged rather than counted either way.
+      if grep -qE '(Expected token|Unexpected token|Syntax error)' <<<"$lint_output"; then
+        echo "lint: QML does not parse (above)" >&2
+        status=1
+      else
+        echo "lint: this qmllint ignores the per-category configuration, so only" >&2
+        echo "      parse errors were judged; run scripts/lint on a desktop with" >&2
+        echo "      Qt 6.11 or newer for the full check" >&2
+      fi
+    fi
   fi
 else
   echo "lint: no QML files to check" >&2
