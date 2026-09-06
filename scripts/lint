@@ -3,10 +3,14 @@
 # Lint every QML file in this plugin, and syntax-check every shell script.
 #
 # Run it before committing, and let CI run it on push. Any warning fails the
-# run: `-W 0` is what makes that true, because qmllint's own default is
-# -1, which prints warnings and still exits 0. The categories that cannot be
-# judged outside a running Quickshell are turned off in .qmllint.ini, so
-# whatever survives is worth reading.
+# run. That verdict is taken from what qmllint printed rather than from its
+# exit code: its default is to print warnings and still exit 0, and the flag
+# that would change that (-W / --max-warnings) does not exist in every Qt 6
+# qmllint -- the one on an Ubuntu runner rejects it. Reading the output behaves
+# the same on every version.
+#
+# The categories that cannot be judged outside a running Quickshell are turned
+# off in .qmllint.ini, so whatever survives is worth reading.
 #
 # Usage: scripts/lint [file ...]     (default: every tracked QML file)
 
@@ -58,7 +62,13 @@ status=0
 if ((${#files[@]} > 0)); then
   # The plugin's own directory is an import path too, so a component in one
   # file resolves when another instantiates it.
-  "$qmllint" -W 0 "${import_args[@]}" -I . "${files[@]}" || status=1
+  lint_output=$("$qmllint" "${import_args[@]}" -I . "${files[@]}" 2>&1)
+  lint_status=$?
+  [[ -n $lint_output ]] && printf '%s\n' "$lint_output"
+  # Info-level findings are printed and do not fail; Warning and Error do.
+  if ((lint_status != 0)) || grep -qE '^(Warning|Error):' <<<"$lint_output"; then
+    status=1
+  fi
 else
   echo "lint: no QML files to check" >&2
 fi
