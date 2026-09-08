@@ -1772,7 +1772,13 @@ Item {
       anchors { top: true; bottom: true; left: true; right: true }
       color: "transparent"
 
-      WlrLayershell.namespace: "omarchy-context-menu"
+      // The stock menu's namespace, on purpose: this plugin stands in for
+      // omarchy.menu, and Omarchy's Hyprland config gives that namespace a
+      // no-animation layer rule. Under any other name the layer fades out
+      // over ~150 ms after dismiss, and an action that captures the screen
+      // right away (screenshot, screen recording) gets the half-faded menu
+      // frozen into the picture.
+      WlrLayershell.namespace: "omarchy-menu"
       WlrLayershell.layer: WlrLayer.Overlay
       WlrLayershell.keyboardFocus: root.grabKeyboard ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
       exclusionMode: ExclusionMode.Ignore
