@@ -952,6 +952,13 @@ Item {
     })
     root.paneGeometry = root.paneGeometry.slice(0, depth + 1)
     root.panes = next
+    // The new pane starts on its first row, whoever opened it. Set after the
+    // pane exists, so its highlight is placed there rather than gliding up
+    // from the parent's row index (the pill's Behaviors are still off in
+    // this tick), and set here rather than by each caller, so a click or a
+    // hover-open does not leave the parent's selection pointing at an
+    // unrelated row of the child.
+    root.selectedIndex = 0
     // A quick forward while a demoted pane is still sliding into the ghost
     // slot would show two children at once — the new pane takes that slot
     // now, so the stand-in yields immediately.
@@ -1073,9 +1080,7 @@ Item {
     if (!entry) return
     var depth = root.panes.length - 1
     var geometry = root.geometryFor(depth)
-    var before = root.panes.length
     root.activate(depth, entry, geometry.x, geometry.y, root.selectedRowY(depth))
-    if (root.panes.length > before) root.selectedIndex = 0
   }
 
   function goBack() {
@@ -2123,12 +2128,20 @@ Item {
               property real trailY: target
               onTargetChanged: { leadY = target; trailY = target }
 
+              // A pane is created with the selection its parent had, and the
+              // opener moves it to the first row in the same tick. Gliding
+              // only starts once that tick is over, so the pill appears on
+              // its first row instead of sliding up to it from a row the
+              // user never chose in this pane.
+              property bool settled: false
+              Component.onCompleted: Qt.callLater(function() { glidePill.settled = true })
+
               Behavior on leadY {
-                enabled: glidePill.visible
+                enabled: glidePill.visible && glidePill.settled
                 NumberAnimation { duration: 240; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.38, 1.21, 0.22, 1.0, 1, 1] }
               }
               Behavior on trailY {
-                enabled: glidePill.visible
+                enabled: glidePill.visible && glidePill.settled
                 NumberAnimation { duration: 380; easing.type: Easing.BezierSpline; easing.bezierCurve: [0.05, 0, 0.133, 0.06, 0.167, 0.4, 0.208, 0.82, 0.25, 1, 1, 1] }
               }
 
