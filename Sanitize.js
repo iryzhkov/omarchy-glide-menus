@@ -87,6 +87,31 @@ function parseMenuText(t) {
     return sanitizeEntries(MenuModel.parseMenuJsonc(t));
 }
 
+// The shell config as an object, for the one thing this plugin reads out of
+// it: its own settings entry. Called under the same rule as parseMenuText --
+// only for a read whose helper exited 0 -- with the same redundant one-way
+// length check, and it fails closed: anything that is not a JSON object at the
+// top level, including a truncated or hand-broken file, yields no settings and
+// therefore the defaults.
+function parseConfigText(t) {
+    t = String(t || "");
+    if (t.length > MAX_MENU_FILE_BYTES) {
+        console.warn("glide-menus: shell config over " + MAX_MENU_FILE_BYTES + " bytes, ignoring");
+        return {};
+    }
+    if (t.trim() === "")
+        return {};
+    try {
+        var parsed = JSON.parse(t);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+            return {};
+        return parsed;
+    } catch (e) {
+        console.warn("glide-menus: shell config is not valid JSON, using defaults");
+        return {};
+    }
+}
+
 // The options a select summon draws, capped in count and in width.
 function sanitizeOptions(list) {
     if (!Array.isArray(list))

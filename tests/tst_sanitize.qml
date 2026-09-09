@@ -78,6 +78,32 @@ TestCase {
         compare(Sanitize.parseMenuText(null).length, 0);
     }
 
+    function test_parseConfigText_reads_an_object() {
+        var config = Sanitize.parseConfigText('{ "bar": { "position": "top" }, "plugins": [] }');
+        compare(config.bar.position, "top");
+        compare(config.plugins.length, 0);
+    }
+
+    function test_parseConfigText_refuses_anything_but_an_object() {
+        compare(Object.keys(Sanitize.parseConfigText("")).length, 0);
+        compare(Object.keys(Sanitize.parseConfigText(null)).length, 0);
+        compare(Object.keys(Sanitize.parseConfigText("[1, 2]")).length, 0);
+        compare(Object.keys(Sanitize.parseConfigText('"a string"')).length, 0);
+    }
+
+    function test_parseConfigText_refuses_a_broken_file() {
+        // A half-written or hand-broken config yields the defaults rather than
+        // a partial settings entry.
+        ignoreWarning(/not valid JSON/);
+        compare(Object.keys(Sanitize.parseConfigText('{ "bar": { "position"')).length, 0);
+    }
+
+    function test_parseConfigText_refuses_an_oversized_source() {
+        var huge = new Array(Sanitize.MAX_MENU_FILE_BYTES + 2).join("z");
+        ignoreWarning(/shell config over/);
+        compare(Object.keys(Sanitize.parseConfigText(huge)).length, 0);
+    }
+
     function test_sanitizeOptions_caps_count_and_width() {
         var many = [];
         for (var i = 0; i < Sanitize.MAX_DMENU_OPTIONS + 100; i++)
