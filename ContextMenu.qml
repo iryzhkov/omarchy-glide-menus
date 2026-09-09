@@ -40,10 +40,16 @@ Item {
   property var pluginRegistry: null
 
   readonly property string pluginId: (manifest && manifest.id) ? String(manifest.id) : "io.github.iryzhkov.glide-menus"
-  readonly property var appLibrary: root.shell ? root.shell.appLibrary : null
+  // The shell's application library when it granted one, ours otherwise. Which
+  // it is depends on the Omarchy version and on when the menu happened to be
+  // mounted; AppLibrary.qml explains why, and offers the same surface either
+  // way, so nothing below this line has to know.
+  readonly property var appLibrary: (root.shell && root.shell.appLibrary)
+    ? root.shell.appLibrary : ownAppLibrary
 
   readonly property string defaultMenuPath: root.omarchyPath + "/default/omarchy/omarchy-menu.jsonc"
   readonly property string userMenuPath: Quickshell.env("HOME") + "/.config/omarchy/extensions/omarchy-menu.jsonc"
+  readonly property string shellConfigPath: Quickshell.env("HOME") + "/.config/omarchy/shell.json"
 
   // ------------------------------------------------------------- settings
   //
@@ -60,8 +66,27 @@ Item {
   // entries, so any other key rides along untouched -- which is what makes the
   // entry a plugin's natural settings store.
 
+  // Where that entry is read from depends on the shell. Omarchy up to 4.0.2
+  // handed a plugin the whole shell config as `shell.shellConfig`; 4.0.3
+  // narrowed what a plugin receives to a capability-scoped API that carries a
+  // one-time copy of the bar section and nothing else, so a plugin reading the
+  // old property silently gets every default. The file the shell writes is
+  // read instead -- bounded and fd-validated like the menu sources, and
+  // watched, so a settings change applies without a restart.
+  readonly property var shellConfig: {
+    var live = (root.shell && root.shell.shellConfig) ? root.shell.shellConfig : null
+    if (live) return live
+
+    var file = root.fileConfig ? root.fileConfig : ({})
+    var bar = file.bar
+    // The API's copy is a snapshot taken when the menu was mounted, so it is
+    // the fallback for a file that could not be read, never the first source.
+    if (!bar && root.shell && root.shell.barConfig) bar = root.shell.barConfig
+    return { bar: bar ? bar : ({}), plugins: file.plugins }
+  }
+
   readonly property var settings: {
-    var config = root.shell ? root.shell.shellConfig : null
+    var config = root.shellConfig
     if (!config) return ({})
 
     var layout = (config.bar && config.bar.layout) ? config.bar.layout : ({})
@@ -1245,9 +1270,70 @@ Item {
     onFileChanged: root.boundedMenuRead(userMenuReader)
   }
 
+  // The shell config, read the same guarded way the menu sources are, for the
+  // plugin's own settings entry (see `shellConfig` above). A refused or
+  // unparsable read leaves the entry empty, which is the same as an unset
+  // setting: the defaults.
+  property var fileConfig: ({})
+
+  function readShellConfig() {
+    if (configReader.running) { configReader.readPending = true; return }
+    configReader.readPending = false
+    configReader.command = root.helperCommand(5, root.menuReadScript(root.shellConfigPath))
+    configReader.running = true
+  }
+
+  Process {
+    id: configReader
+    property bool readPending: false
+    stdout: StdioCollector { id: configCollector }
+    onExited: function(exitCode, exitStatus) {
+      var usable = Helper.runUsable(exitCode, exitStatus)
+      // Absent is the ordinary case for a user who has never changed a
+      // setting, so a refused read is not worth a warning unless the file is
+      // there; exit 3 is a failed check on the opened descriptor.
+      root.fileConfig = usable ? Sanitize.parseConfigText(configCollector.text) : ({})
+      if (configReader.readPending) Qt.callLater(function() { root.readShellConfig() })
+    }
+  }
+
+  FileView {
+    path: root.shellConfigPath
+    preload: false
+    watchChanges: true
+    printErrors: false
+    onFileChanged: root.readShellConfig()
+  }
+
   Component.onCompleted: {
     root.boundedMenuRead(defaultMenuReader)
     root.boundedMenuRead(userMenuReader)
+    root.readShellConfig()
+  }
+
+  // The two lists of applications the launcher does not show: Omarchy's own
+  // hide list, and the entries that hide themselves with NoDisplay or with an
+  // OnlyShowIn/NotShowIn that rules this desktop out. The second list is read
+  // by the shell's own scanner, so the Apps submenu and the launcher agree on
+  // what is missing from it. Either file may be absent -- an older Omarchy, a
+  // trimmed install -- and then that part of the scan simply reports nothing.
+  function hiddenEntriesScript() {
+    var desktop = [Quickshell.env("XDG_CURRENT_DESKTOP"),
+                   Quickshell.env("XDG_SESSION_DESKTOP"),
+                   Quickshell.env("DESKTOP_SESSION")]
+      .filter(function(value) { return String(value || "").length > 0 })
+      .join(":")
+    return "/usr/bin/cat " + Helper.shellQuoted(root.omarchyPath + "/default/omarchy/launcher.hides") + " 2>/dev/null\n"
+      + "/bin/bash " + Helper.shellQuoted(root.omarchyPath + "/shell/services/hidden-entries.sh")
+      + " " + Helper.shellQuoted(desktop) + " 2>/dev/null\n"
+  }
+
+  // Kept even while the shell's own library is in use: that handle can be
+  // revoked mid-session, and building this one only at that moment would leave
+  // the Apps submenu empty until its scan came back.
+  AppLibrary {
+    id: ownAppLibrary
+    hiddenScanCommand: root.helperPipeline(5, root.hiddenEntriesScript(), root.maxHelperBytes)
   }
 
   // -------------------------------------------------------------- guards
@@ -1327,8 +1413,9 @@ Item {
   // A `provider:` submenu has no children in the JSONC; its rows are
   // enumerated at runtime. The bash ones emit `label\tvalue\tcurrent` per line
   // and are lifted straight from the built-in menu so both agree on what the
-  // list is and what picking from it runs. `apps` is native: rows come from
-  // the shell's shared AppLibrary, the same one the launcher reads.
+  // list is and what picking from it runs. `apps` is native: rows come from an
+  // application library rather than a subprocess -- the shell's own when it
+  // granted one, otherwise the plugin's (AppLibrary.qml).
 
   property var providersLoaded: ({})
   property var providerQueue: []
@@ -1349,7 +1436,7 @@ Item {
 
   function providerSupported(name) {
     var key = String(name || "")
-    if (key === "apps") return root.inlineApps && root.appLibrary !== null
+    if (key === "apps") return root.inlineApps && !!root.appLibrary
     return root.providerSpecs[key] !== undefined
   }
 
@@ -1452,9 +1539,9 @@ Item {
     root.itemOrder = merged.itemOrder
   }
 
-  // Apps come from the shell's AppLibrary rather than a bash enumeration, so
-  // they carry their real icons and launch through the same code path (and the
-  // same launch feedback) as the built-in launcher.
+  // Apps come from an application library rather than a bash enumeration, so
+  // they carry their real icons and launch the same way the built-in launcher
+  // launches them (through the shell's library, with its launch feedback too).
   function mergeAppRows(menuId) {
     if (!root.appLibrary) return
 
