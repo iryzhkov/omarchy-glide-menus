@@ -212,6 +212,14 @@ Item {
   property var itemOrder: []
   property var defaultItems: []
   property var userItems: []
+  // Bindings that call into rowsFor/displayRows do not track `items` on their
+  // own. Bump this whenever the tree changes so panes and the ghost preview
+  // redraw instead of staying empty after a provider fills in.
+  property int modelEpoch: 0
+
+  function bumpModel() {
+    root.modelEpoch = root.modelEpoch + 1
+  }
 
   property var whenResults: ({})
   property var checkedResults: ({})
@@ -557,6 +565,7 @@ Item {
     var merged = MenuModel.mergeMenuSources(root.defaultItems, root.userItems)
     root.items = merged.items
     root.itemOrder = merged.itemOrder
+    root.bumpModel()
     // A rebuild drops every provider row with it, so anything already showing
     // has to be enumerated again rather than left as a submenu that went empty.
     root.providersLoaded = ({})
@@ -671,10 +680,15 @@ Item {
   // A row that opens another pane. Provider-backed rows count before their
   // contents have loaded -- that is the point of the chevron -- as long as the
   // provider is one this plugin can fill in itself.
+  // Omarchy 4.5 gives Apps both provider:"apps" and an action that opens the
+  // dock grid; MenuModel then types the row as "action". The cascade still
+  // owns the provider, so kind must not hide the submenu.
   function isSubmenu(entry) {
     if (!entry) return false
+    // Any provider is a cascade pane, even when 4.5 also attached an action
+    // (Apps → dock grid) that made MenuModel type the row as "action".
+    if (entry.provider) return true
     if (entry.kind !== "menu" && entry.kind !== "link") return false
-    if (entry.provider) return root.providerSupported(entry.provider)
     return root.rowsFor(entry.kind === "link" ? entry.target : entry.id).length > 0
   }
 
@@ -714,13 +728,15 @@ Item {
     root.originX = spec.x
     root.originY = spec.y
     root.filterText = ""
-    root.selectedIndex = -1
     root.paneGeometry = []
     root.panes = [spec]
     root.searchProvidersLoaded = false
     exitClear.stop()
     root.exitSnapshot = null
     root.opened = true
+    // Highlight the first row so Super+Space lands on Apps and the ghost
+    // preview of that submenu can appear without an extra Down.
+    root.selectedIndex = 0
 
     // A select or input pane draws its rows from the payload, so the menu
     // tree behind it is not consulted and nothing needs to be evaluated or
@@ -734,6 +750,9 @@ Item {
     // than trusting the set from the last open.
     root.evaluateGuards()
     root.loadProvidersForOpenPanes()
+    // Apps is the first root row; fill it now so the keyboard ghost is not
+    // an empty pane until Right/Enter.
+    if (root.item("apps")) root.loadProvider("apps")
   }
 
   // Anchor the first pane to a rectangle rather than a point -- the bar button
@@ -1024,7 +1043,7 @@ Item {
     // menu, opened at that route, rather than show an empty pane. Unless this
     // plugin *is* what the built-in menu resolves to -- installed as its
     // replacement -- in which case the handoff would come straight back here.
-    if (entry.provider) {
+    if (entry.provider && !root.providerSupported(entry.provider)) {
       if (!root.stockMenuAvailable()) return
       root.dismiss()
       Util.execDetached("omarchy-menu summon " + Util.shellQuote(entry.id))
@@ -1431,6 +1450,18 @@ Item {
       script: "current=$(powerprofilesctl get 2>/dev/null); omarchy-powerprofiles-list 2>/dev/null | while read -r p; do [[ -z $p ]] && continue; printf '%s\\t%s\\t%s\\n' \"$p\" \"$p\" \"$current\"; done",
       icon: "󰐋",
       actionFor: function(value) { return "omarchy-powerprofiles-set autodetect " + Util.shellQuote(value) }
+    },
+    "kernels": {
+      script: "current=$(omarchy-kernel get 2>/dev/null); omarchy-kernel list 2>/dev/null | while read -r k; do [[ -z $k ]] && continue; printf '%s\\t%s\\t%s\\n' \"$k\" \"$k\" \"$current\"; done",
+      icon: "",
+      volatile: true,
+      actionFor: function(value) { return "omarchy-kernel set " + Util.shellQuote(value) }
+    },
+    "languages": {
+      script: "current=$(omarchy-language 2>/dev/null); omarchy-language list 2>/dev/null | while IFS=$'\\t' read -r name code english; do [[ -z $code ]] && continue; printf '%s\\t%s\\t%s\\t%s\\n' \"$name\" \"$code\" \"$current\" \"$english\"; done",
+      icon: "",
+      volatile: true,
+      actionFor: function(value) { return "omarchy-language " + Util.shellQuote(value) }
     }
   })
 
@@ -1537,6 +1568,7 @@ Item {
     var merged = MenuModel.swapProviderRows(root.items, root.itemOrder, menuId, providerRows)
     root.items = merged.items
     root.itemOrder = merged.itemOrder
+    root.bumpModel()
   }
 
   // Apps come from an application library rather than a bash enumeration, so
@@ -1581,6 +1613,7 @@ Item {
     var merged = MenuModel.swapProviderRows(root.items, root.itemOrder, menuId, appRows)
     root.items = merged.items
     root.itemOrder = merged.itemOrder
+    root.bumpModel()
   }
 
   Process {
@@ -1851,29 +1884,17 @@ Item {
   }
 
   // ----------------------------------------------------------- the cascade
+  //
+  // Omarchy 4.5 maps overlays with OverlayWindow: a fresh fullscreen surface
+  // per open, held transparent until Qt has the output scale. The previous
+  // always-on PanelWindow per screen kept keyboard grab (search still worked)
+  // while pointer hits missed the rows after the 4.5 shell/HiDPI change.
 
-  Variants {
-    model: Quickshell.screens
-
-    PanelWindow {
-      id: panel
-      required property var modelData
-
-      screen: modelData
-      visible: root.opened && root.targetScreen === modelData.name
-      anchors { top: true; bottom: true; left: true; right: true }
-      color: "transparent"
-
-      // The stock menu's namespace, on purpose: this plugin stands in for
-      // omarchy.menu, and Omarchy's Hyprland config gives that namespace a
-      // no-animation layer rule. Under any other name the layer fades out
-      // over ~150 ms after dismiss, and an action that captures the screen
-      // right away (screenshot, screen recording) gets the half-faded menu
-      // frozen into the picture.
-      WlrLayershell.namespace: "omarchy-menu"
-      WlrLayershell.layer: WlrLayer.Overlay
-      WlrLayershell.keyboardFocus: root.grabKeyboard ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
-      exclusionMode: ExclusionMode.Ignore
+  OverlayWindow {
+    id: panel
+    shown: root.opened
+    shownKeyboardFocus: root.grabKeyboard ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
+    WlrLayershell.namespace: "omarchy-menu"
 
       // Click-away. No scrim: a context menu should not dim the desktop it is
       // acting on. Right-click here re-opens at the new spot, which is what a
@@ -1882,7 +1903,8 @@ Item {
         anchors.fill: parent
         acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
         onPressed: function(mouse) {
-          if (mouse.button === Qt.RightButton) root.openAt(panel.modelData.name, mouse.x, mouse.y)
+          if (mouse.button === Qt.RightButton)
+            root.openAt((panel.screen && panel.screen.name) || root.targetScreen, mouse.x, mouse.y)
           else root.dismiss()
           mouse.accepted = true
         }
@@ -1908,7 +1930,7 @@ Item {
       // otherwise spawn in the same slot the departing pane is sliding
       // through — two copies of the same menu at once.
       Loader {
-        active: root.centeredLayout && root.animations && root.ghostMenuId !== ""
+        active: root.centeredLayout && root.ghostMenuId !== ""
           && root.exitSnapshot === null && !root.paneEntering
         sourceComponent: GhostPane {
           panelItem: panel
@@ -1975,7 +1997,10 @@ Item {
           // truncated, so `index` can briefly outrun `panes`. Stand in for the
           // missing spec rather than read `.x` off undefined.
           readonly property var spec: root.panes[index] || ({ x: 0, y: 0 })
-          readonly property var rows: root.visibleRows(index)
+          readonly property var rows: {
+            var _ = root.modelEpoch
+            return root.visibleRows(index)
+          }
           readonly property bool deepest: index === root.panes.length - 1
           readonly property string paneFilter: deepest ? root.filterText : String(spec.filter || "")
           // A select or input pane shows the header from the start: it is
@@ -2014,11 +2039,14 @@ Item {
           // disappears with the search, and this height is what the top edge
           // is placed from, which has to stay still while one is typed.
           readonly property int sizedRows: root.dmenuMode === "input" ? 0 : Math.max(rows.length, 1)
-          readonly property real naturalHeight: Math.min(
-            root.capHeight((root.dmenuActive ? pane.headerHeight : 0)
-              + (root.dmenuActive ? sizedRows : Math.max(root.displayRows(spec.menuId).length, 1))
-                * root.rowHeight + root.panePadding * 2),
-            panel.height - Style.gapsOut * 2)
+          readonly property real naturalHeight: {
+            var _ = root.modelEpoch
+            return Math.min(
+              root.capHeight((root.dmenuActive ? pane.headerHeight : 0)
+                + (root.dmenuActive ? sizedRows : Math.max(root.displayRows(spec.menuId).length, 1))
+                  * root.rowHeight + root.panePadding * 2),
+              panel.height - Style.gapsOut * 2)
+          }
 
           x: root.centeredLayout
             ? centeredX
@@ -2136,9 +2164,9 @@ Item {
           // right-click anywhere in a pane walk back one level.
           MouseArea {
             anchors.fill: parent
-            acceptedButtons: Qt.RightButton
+            acceptedButtons: Qt.LeftButton | Qt.RightButton
             onPressed: function(mouse) {
-              root.goBack()
+              if (mouse.button === Qt.RightButton) root.goBack()
               mouse.accepted = true
             }
           }
@@ -2247,35 +2275,19 @@ Item {
               readonly property var entry: pane.rows[row.index]
               readonly property bool isApp: entry && entry.kind === "app"
               readonly property bool submenu: root.isSubmenu(entry) || (entry && entry.provider)
-              readonly property bool active: hover.hovered
+              readonly property bool active: rowMouse.containsMouse
                 || (pane.deepest && root.selectedIndex === row.index)
                 || root.submenuOpenFor(pane.index, entry)
 
               width: list.width
               height: root.rowHeight
 
-              HoverHandler {
-                id: hover
-                // Opening on hover is what makes a cascade feel like a cascade.
-                // A short dwell keeps a diagonal sweep toward an open submenu
-                // from tearing it down on the way past.
-                onHoveredChanged: {
-                  if (!root.hoverSelects) return
-                  if (hovered) {
-                    if (pane.deepest) root.selectedIndex = row.index
-                    dwell.restart()
-                  } else {
-                    dwell.stop()
-                  }
-                }
-              }
-
               Timer {
                 id: dwell
                 interval: root.submenuDelay
                 repeat: false
                 onTriggered: {
-                  if (!hover.hovered) return
+                  if (!rowMouse.containsMouse) return
                   if (row.entry && root.isSubmenu(row.entry)) {
                     if (root.targetOf(row.entry) === root.recentlyClosedMenu) return
                     root.openChild(pane.index, row.entry, pane.x, pane.y,
@@ -2407,9 +2419,17 @@ Item {
               }
 
               MouseArea {
+                id: rowMouse
                 anchors.fill: parent
+                hoverEnabled: true
                 acceptedButtons: Qt.LeftButton
                 cursorShape: Qt.PointingHandCursor
+                onEntered: {
+                  if (!root.hoverSelects) return
+                  if (pane.deepest) root.selectedIndex = row.index
+                  dwell.restart()
+                }
+                onExited: dwell.stop()
                 onClicked: function(mouse) {
                   root.activate(pane.index, row.entry, pane.x, pane.y,
                                 row.y - list.contentY + root.panePadding + pane.headerHeight)
@@ -2421,7 +2441,6 @@ Item {
         }
       }
     }
-  }
 
   component GhostPane: BorderSurface {
     id: ghost
@@ -2433,7 +2452,10 @@ Item {
     // pane's colors so the hand-off is seamless.
     property bool dimmed: true
 
-    readonly property var ghostRows: ghost.menuId ? root.displayRows(ghost.menuId) : []
+    readonly property var ghostRows: {
+      var _ = root.modelEpoch
+      return ghost.menuId ? root.displayRows(ghost.menuId) : []
+    }
 
     width: root.paneWidth
     height: Math.min(
